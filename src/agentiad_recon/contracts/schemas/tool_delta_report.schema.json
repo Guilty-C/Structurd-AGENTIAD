@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/tool_delta_report.schema.json",
+  "title": "AgentIADToolDeltaReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "tool_run_id",
+    "tool_mode",
+    "baseline_run_id",
+    "baseline_tool_mode",
+    "metric_deltas",
+    "tool_usage_delta",
+    "notes"
+  ],
+  "properties": {
+    "tool_run_id": { "type": "string", "minLength": 1 },
+    "tool_mode": {
+      "type": "string",
+      "enum": ["pz_only", "pz_cr"]
+    },
+    "baseline_run_id": { "type": "string", "minLength": 1 },
+    "baseline_tool_mode": {
+      "type": "string",
+      "const": "no_tools"
+    },
+    "metric_deltas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parser_valid_rate",
+        "schema_valid_rate",
+        "anomaly_present_accuracy",
+        "top_anomaly_accuracy"
+      ],
+      "properties": {
+        "parser_valid_rate": { "type": "number" },
+        "schema_valid_rate": { "type": "number" },
+        "anomaly_present_accuracy": { "type": "number" },
+        "top_anomaly_accuracy": { "type": "number" }
+      }
+    },
+    "tool_usage_delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolcall_rate", "per_tool_frequency"],
+      "properties": {
+        "toolcall_rate": { "type": "number" },
+        "per_tool_frequency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["PZ", "CR"],
+          "properties": {
+            "PZ": { "type": "number" },
+            "CR": { "type": "number" }
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

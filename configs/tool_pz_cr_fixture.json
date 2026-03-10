@@ -1,0 +1,43 @@
+{
+  "run_id": "prompt_1_4_tool_fixture_pz_cr",
+  "mode": "pz_cr",
+  "prompt_version": "agentiad_tool_prompt_v1_4",
+  "parser_version": "agentiad_final_answer_parser_v1_3",
+  "execution_boundary": "local",
+  "sample_source": {
+    "kind": "fixture",
+    "path": "tests/fixtures/mmad_fixture",
+    "source_name": "mmad_fixture",
+    "splits": ["train", "val"],
+    "max_samples": 3
+  },
+  "backend": {
+    "type": "mock",
+    "name": "mock_tool_pz_cr_v1",
+    "policy": "fixture_scripted_pz_cr_v1",
+    "runtime_owner": "vllm_future_remote"
+  },
+  "seeds": [0, 1],
+  "max_tool_turns": 3,
+  "artifacts": {
+    "root": "dist/outputs/prompt_1_4_tool_fixture_pz_cr",
+    "raw_outputs": "raw_outputs",
+    "traces": "traces",
+    "predictions": "predictions",
+    "metrics": "metrics",
+    "delta": "delta"
+  },
+  "compare_to": {
+    "config_path": "configs/baseline_non_tool_fixture.json",
+    "artifact_root": "dist/outputs/prompt_1_4_tool_fixture_pz_cr/_baseline_compare"
+  },
+  "remote_expectations": [
+    "Swap the scripted mock backend for the maintained vLLM-backed runtime on the remote server.",
+    "Keep the same canonical prompt, parser, trace, and artifact contracts.",
+    "Use identical seeds, splits, and comparable sample selection when running the real comparative evaluation later."
+  ],
+  "notes": [
+    "This run definition is for local fixture-backed pz_cr smoke validation only.",
+    "It is not evidence of real model quality or full-MMAD evaluation."
+  ]
+}

@@ -1,11 +1,11 @@
 """Prompt and final-answer contract helpers for AgentIAD.
 
-This module keeps one versioned prompt family for both tool-aware and baseline
-evaluation paths. Prompt 1.3 extends the prompt surface with a non-tool
-baseline variant that uses `<think>` and `<answer>` blocks while reusing the
-same strict final-answer parser and canonical final-answer schema. There is no
+This module keeps one versioned prompt family for the non-tool baseline and the
+tool-augmented inference paths. Prompt 1.4 adds explicit tool-enabled prompt
+builders for `pz_only` and `pz_cr` while preserving the same `<think>` plus
+`<answer>` final contract and the same strict parser. There is no standalone
 CLI here; import the builders or run `python -m agentiad_recon.baseline --help`
-for the baseline entrypoint that consumes these helpers.
+for the inference entrypoint that consumes these helpers.
 """
 
 from __future__ import annotations
@@ -18,16 +18,9 @@ from typing import Any
 from agentiad_recon.contracts import validate_payload
 
 
-PROMPT_VERSION = "agentiad_prompt_v1_2"
+PROMPT_VERSION = "agentiad_tool_prompt_v1_4"
 BASELINE_PROMPT_VERSION = "agentiad_baseline_prompt_v1_3"
 FINAL_ANSWER_PARSER_VERSION = "agentiad_final_answer_parser_v1_3"
-FINAL_ANSWER_TEMPLATE = """<final_answer>
-  <anomaly_present>true|false</anomaly_present>
-  <top_anomaly>anomaly_label_or_null</top_anomaly>
-  <visual_descriptions>
-    <item>short visual fact</item>
-  </visual_descriptions>
-</final_answer>"""
 BASELINE_ANSWER_TEMPLATE = """<think>
 short reasoning notes
 </think>
@@ -82,7 +75,7 @@ def _tooling_instruction(tool_path: str) -> str:
 
 
 def build_prompt(sample: dict[str, Any], *, tool_path: str) -> PromptBundle:
-    """Build the canonical local prompt contract for one sample and tool mode."""
+    """Build the canonical tool-enabled prompt contract for one sample and mode."""
 
     image_rule = (
         f"Primary image: {sample['image']['uri']}. "
@@ -90,9 +83,9 @@ def build_prompt(sample: dict[str, Any], *, tool_path: str) -> PromptBundle:
     )
     system_message = (
         f"You are a single-agent anomaly inspector. Prompt version: {PROMPT_VERSION}. "
-        "You may either emit one <tool_call> block or one <final_answer> block at a time. "
+        "You may either emit one `<tool_call>` block or one `<think>` plus `<answer>` pair at a time. "
         f"Tool call format:\n{TOOL_CALL_TEMPLATE}\n"
-        f"Final answer format:\n{FINAL_ANSWER_TEMPLATE}"
+        f"Final answer format:\n{BASELINE_ANSWER_TEMPLATE}"
     )
     user_message = (
         f"Sample id: {sample['sample_id']}\n"
@@ -117,7 +110,7 @@ def build_prompt(sample: dict[str, Any], *, tool_path: str) -> PromptBundle:
                 "metadata": {"prompt_version": PROMPT_VERSION},
             },
         ],
-        stop_sequences=["</tool_call>", "</final_answer>"],
+        stop_sequences=["</tool_call>", "</answer>"],
     )
 
 

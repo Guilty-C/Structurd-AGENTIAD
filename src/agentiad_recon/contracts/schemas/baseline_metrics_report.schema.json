@@ -19,7 +19,7 @@
     "run_id": { "type": "string", "minLength": 1 },
     "tool_mode": {
       "type": "string",
-      "const": "no_tools"
+      "enum": ["no_tools", "pz_only", "pz_cr"]
     },
     "prompt_version": { "type": "string", "minLength": 1 },
     "parser_version": { "type": "string", "minLength": 1 },
@@ -48,13 +48,17 @@
         "parser_valid_rate",
         "schema_valid_rate",
         "anomaly_present_accuracy",
-        "top_anomaly_accuracy"
+        "top_anomaly_accuracy",
+        "toolcall_rate",
+        "per_tool_frequency"
       ],
       "properties": {
         "parser_valid_rate": { "$ref": "#/$defs/meanStd" },
         "schema_valid_rate": { "$ref": "#/$defs/meanStd" },
         "anomaly_present_accuracy": { "$ref": "#/$defs/meanStd" },
-        "top_anomaly_accuracy": { "$ref": "#/$defs/meanStd" }
+        "top_anomaly_accuracy": { "$ref": "#/$defs/meanStd" },
+        "toolcall_rate": { "$ref": "#/$defs/meanStd" },
+        "per_tool_frequency": { "$ref": "#/$defs/perToolMeanStd" }
       }
     }
   },
@@ -71,7 +75,9 @@
         "parser_valid_rate",
         "schema_valid_rate",
         "anomaly_present_accuracy",
-        "top_anomaly_accuracy"
+        "top_anomaly_accuracy",
+        "toolcall_rate",
+        "per_tool_frequency"
       ],
       "properties": {
         "scope": {
@@ -94,7 +100,17 @@
         "parser_valid_rate": { "type": "number" },
         "schema_valid_rate": { "type": "number" },
         "anomaly_present_accuracy": { "type": "number" },
-        "top_anomaly_accuracy": { "type": "number" }
+        "top_anomaly_accuracy": { "type": "number" },
+        "toolcall_rate": { "type": "number" },
+        "per_tool_frequency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["PZ", "CR"],
+          "properties": {
+            "PZ": { "type": "number" },
+            "CR": { "type": "number" }
+          }
+        }
       }
     },
     "meanStd": {
@@ -104,6 +120,15 @@
       "properties": {
         "mean": { "type": "number" },
         "std": { "type": "number" }
+      }
+    },
+    "perToolMeanStd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["PZ", "CR"],
+      "properties": {
+        "PZ": { "$ref": "#/$defs/meanStd" },
+        "CR": { "$ref": "#/$defs/meanStd" }
       }
     }
   }

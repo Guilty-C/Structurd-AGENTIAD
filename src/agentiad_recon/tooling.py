@@ -138,7 +138,7 @@ def protocol_event(text: str) -> str:
     """Classify one model output as a tool call, final answer, or continuation."""
 
     has_tool_call = "<tool_call>" in text
-    has_final_answer = "<final_answer>" in text
+    has_final_answer = "<final_answer>" in text or "<answer>" in text
     if has_tool_call and has_final_answer:
         raise ToolContractError("Output cannot contain both a tool call and a final answer block")
     if has_tool_call:
@@ -351,6 +351,20 @@ def reinsert_tool_result(history: list[dict[str, Any]], result: ToolResult) -> l
     """Append a tool result message to a dialogue history in canonical form."""
 
     payload = result.to_payload()
+    image_refs: list[str] = []
+    if result.tool_name == "PZ":
+        artifact_path = payload["output_payload"].get("artifact_path")
+        if isinstance(artifact_path, str):
+            image_refs.append(artifact_path)
+    elif result.tool_name == "CR":
+        exemplar = payload["output_payload"].get("selected_exemplar")
+        if isinstance(exemplar, dict):
+            image_uri = exemplar.get("image_uri")
+            if isinstance(image_uri, str):
+                image_refs.append(image_uri)
+
+    # Tool outputs stay machine-readable in content while explicit image refs
+    # preserve the crop/reference insertion contract for later runtimes.
     next_history = list(history)
     next_history.append(
         {
@@ -360,7 +374,7 @@ def reinsert_tool_result(history: list[dict[str, Any]], result: ToolResult) -> l
             "call_id": result.call_id,
             "content": json.dumps(payload["output_payload"], sort_keys=True),
             "metadata": {"output_ref": payload["output_ref"]},
-            "image_refs": [],
+            "image_refs": image_refs,
         }
     )
     return next_history

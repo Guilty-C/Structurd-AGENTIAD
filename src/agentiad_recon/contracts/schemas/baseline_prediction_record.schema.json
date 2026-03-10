@@ -12,6 +12,7 @@
     "category",
     "seed",
     "tool_mode",
+    "tool_usage",
     "prompt_version",
     "parser_version",
     "backend_name",
@@ -37,7 +38,10 @@
     "seed": { "type": "integer" },
     "tool_mode": {
       "type": "string",
-      "const": "no_tools"
+      "enum": ["no_tools", "pz_only", "pz_cr"]
+    },
+    "tool_usage": {
+      "$ref": "#/$defs/toolUsage"
     },
     "prompt_version": { "type": "string", "minLength": 1 },
     "parser_version": { "type": "string", "minLength": 1 },
@@ -62,6 +66,33 @@
     "metadata": {
       "type": "object",
       "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "toolUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_calls", "samples_with_tool_call", "per_tool_counts"],
+      "properties": {
+        "total_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "samples_with_tool_call": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "per_tool_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["PZ", "CR"],
+          "properties": {
+            "PZ": { "type": "integer", "minimum": 0 },
+            "CR": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
     }
   }
 }

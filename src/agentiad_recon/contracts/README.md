@@ -15,6 +15,8 @@ Locked schemas:
 - `baseline_prediction_record.schema.json`: one canonical per-sample baseline prediction artifact
 - `baseline_metrics_report.schema.json`: one canonical metrics bundle containing per-seed, per-class, and aggregate baseline metrics
 - `baseline_run_summary.schema.json`: one canonical baseline evidence summary manifest
+- `tool_run_definition.schema.json`: one canonical tool-enabled run config for `pz_only` and `pz_cr`
+- `tool_delta_report.schema.json`: one canonical delta-vs-baseline comparison artifact
 
 Scientific constraints expressed by these schemas:
 

@@ -22,7 +22,7 @@
     "run_id": { "type": "string", "minLength": 1 },
     "tool_mode": {
       "type": "string",
-      "const": "no_tools"
+      "enum": ["no_tools", "pz_only", "pz_cr"]
     },
     "backend_name": { "type": "string", "minLength": 1 },
     "prompt_version": { "type": "string", "minLength": 1 },
@@ -59,6 +59,24 @@
         "invalid": { "type": "integer", "minimum": 0 }
       }
     },
+    "tool_usage_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_calls", "samples_with_tool_calls", "per_tool_counts"],
+      "properties": {
+        "total_calls": { "type": "integer", "minimum": 0 },
+        "samples_with_tool_calls": { "type": "integer", "minimum": 0 },
+        "per_tool_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["PZ", "CR"],
+          "properties": {
+            "PZ": { "type": "integer", "minimum": 0 },
+            "CR": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
     "artifact_paths": {
       "type": "object",
       "additionalProperties": false,
@@ -82,7 +100,8 @@
         "per_class_metrics": { "type": "string", "minLength": 1 },
         "aggregate_metrics": { "type": "string", "minLength": 1 },
         "run_metadata": { "type": "string", "minLength": 1 },
-        "run_manifest": { "type": "string", "minLength": 1 }
+        "run_manifest": { "type": "string", "minLength": 1 },
+        "delta_report": { "type": "string" }
       }
     },
     "notes": {
