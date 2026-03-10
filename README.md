@@ -107,6 +107,7 @@ Trajectory reconstruction for SFT is now part of the local audited repo state.
 - `src/agentiad_recon/sft.py` reuses the Prompt 1.4 prompt, tool, and trace contracts to export both `pz_only` and `pz_cr` trajectories as one unified SFT dataset
 - `src/agentiad_recon/ms_swift_adapter.py` adds a thin MS-Swift adapter/config layer rather than a custom trainer
 - `configs/sft_export_fixture.json` freezes the local fixture-backed SFT export definition
+- `configs/sft_export_remote_template.json` freezes the remote-only full export definition
 - `configs/ms_swift_sft_fixture.json` freezes the local MS-Swift adapter recipe
 - `configs/ms_swift_sft_remote_template.json` freezes the remote-only full-SFT template without executing it locally
 
@@ -163,6 +164,7 @@ Remote server responsibilities later:
 - Baseline fixture definition: [configs/baseline_non_tool_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/baseline_non_tool_fixture.json) freezes the local-only mock-backed baseline run definition.
 - Tool-enabled fixture definitions: [configs/tool_pz_only_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/tool_pz_only_fixture.json) and [configs/tool_pz_cr_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/tool_pz_cr_fixture.json) freeze the local-only scripted smoke runs for `pz_only` and `pz_cr`.
 - SFT fixture export definition: [configs/sft_export_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/sft_export_fixture.json) freezes the local-only Prompt 1.5 export contract for unified `pz_only` plus `pz_cr` training trajectories.
+- SFT remote export template: [configs/sft_export_remote_template.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/sft_export_remote_template.json) freezes the remote/server Prompt 1.5 full-export contract with no local sample cap.
 - MS-Swift local recipe: [configs/ms_swift_sft_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/ms_swift_sft_fixture.json) freezes the local adapter surface and tiny sanity settings.
 - MS-Swift remote template: [configs/ms_swift_sft_remote_template.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/ms_swift_sft_remote_template.json) freezes the remote-only full-SFT config package.
 - Delta-vs-baseline artifacts from Prompt 1.4 are structural local smoke evidence only; they do not claim tool quality gains on real models.

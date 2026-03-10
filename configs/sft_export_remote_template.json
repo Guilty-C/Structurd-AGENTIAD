@@ -1,0 +1,17 @@
+{
+  "run_id": "prompt_1_5_sft_remote_export_v1",
+  "execution_boundary": "remote_only",
+  "sample_source": {
+    "kind": "mmad",
+    "path": "/remote/datasets/MMAD",
+    "source_name": "mmad",
+    "splits": ["train"],
+    "max_samples_per_mode": null
+  },
+  "trajectory_modes": ["pz_only", "pz_cr"],
+  "output": {
+    "root": "/remote/outputs/agentiad_prompt_1_5_data",
+    "canonical_dataset": "agentiad_prompt_1_5_sft_dataset.jsonl",
+    "manifest": "agentiad_prompt_1_5_sft_dataset.manifest.json"
+  }
+}

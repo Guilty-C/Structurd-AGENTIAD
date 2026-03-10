@@ -12,7 +12,7 @@
 - PASS: validates message ordering, image references, exemplar linkage, and final answer consistency
 - PASS: exports decisive-turn loss targets for the last visual operation, final reasoning step, and final answer alignment
 - PASS: adds a thin MS-Swift adapter layer in `src/agentiad_recon/ms_swift_adapter.py` instead of trainer internals
-- PASS: externalizes framework configs in `configs/sft_export_fixture.json`, `configs/ms_swift_sft_fixture.json`, and `configs/ms_swift_sft_remote_template.json`
+- PASS: externalizes framework configs in `configs/sft_export_fixture.json`, `configs/sft_export_remote_template.json`, `configs/ms_swift_sft_fixture.json`, and `configs/ms_swift_sft_remote_template.json`
 - PASS: supports LoRA, checkpoint, logging, and resume config surfaces through `ms_swift_recipe.schema.json`
 - PASS: only runs lightweight local export, schema validation, unit tests, and acceptance checks
 - PASS: reports honestly that MS-Swift is unavailable locally and therefore stops at format/config validation
@@ -36,6 +36,7 @@
 - `src/agentiad_recon/contracts/schemas/ms_swift_recipe.schema.json`: added externalized MS-Swift recipe schema
 - `src/agentiad_recon/contracts/schemas/ms_swift_record.schema.json`: added thin MS-Swift-facing dataset row schema
 - `configs/sft_export_fixture.json`: froze the local fixture-backed SFT export definition
+- `configs/sft_export_remote_template.json`: froze the remote-only full export template
 - `configs/ms_swift_sft_fixture.json`: froze the local MS-Swift adapter recipe
 - `configs/ms_swift_sft_remote_template.json`: froze the remote-only full-SFT template
 - `tests/test_prompt_1_5_sft_export.py`: added local Prompt 1.5 trajectory and adapter tests
