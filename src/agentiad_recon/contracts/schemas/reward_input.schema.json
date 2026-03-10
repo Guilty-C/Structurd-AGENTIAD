@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentiad/reward_input.schema.json",
+  "title": "AgentIADRewardInput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sample_id",
+    "trajectory_id",
+    "stage",
+    "tool_path",
+    "perception_signals",
+    "behavior_signals"
+  ],
+  "properties": {
+    "sample_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trajectory_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["sft", "grpo"]
+    },
+    "tool_path": {
+      "type": "string",
+      "enum": ["pz_only", "pz_cr"]
+    },
+    "perception_signals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["answer_alignment"],
+      "properties": {
+        "answer_alignment": {
+          "type": "number"
+        },
+        "localization_support": {
+          "type": "number"
+        }
+      }
+    },
+    "behavior_signals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool_path_valid"],
+      "properties": {
+        "tool_path_valid": {
+          "type": "number"
+        },
+        "tool_use_efficiency": {
+          "type": "number"
+        },
+        "single_agent_compliance": {
+          "type": "number"
+        }
+      }
+    }
+  }
+}

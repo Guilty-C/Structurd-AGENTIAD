@@ -1,0 +1,11 @@
+{
+  "dataset_name": "MMAD",
+  "split": "train",
+  "sample_schema_ref": "agentiad/sample.schema.json",
+  "source_manifest_hash": "replace_me",
+  "sample_count": 0,
+  "notes": [
+    "Populate on the remote server before heavy execution.",
+    "Hash this canonical JSON file and record the digest in run metadata."
+  ]
+}

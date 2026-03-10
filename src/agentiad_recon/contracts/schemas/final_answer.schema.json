@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentiad/final_answer.schema.json",
+  "title": "AgentIADFinalAnswer",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "anomaly_present",
+    "top_anomaly",
+    "visual_descriptions"
+  ],
+  "properties": {
+    "anomaly_present": {
+      "type": "boolean"
+    },
+    "top_anomaly": {
+      "type": ["string", "null"]
+    },
+    "visual_descriptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

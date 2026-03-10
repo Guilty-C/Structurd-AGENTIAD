@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+dist/outputs/*
+!dist/outputs/.gitkeep
+
+dist/paper_artifacts/*
+!dist/paper_artifacts/.gitkeep

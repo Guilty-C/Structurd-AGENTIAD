@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentiad/sample.schema.json",
+  "title": "AgentIADSample",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sample_id",
+    "split",
+    "source",
+    "image",
+    "single_agent",
+    "allowed_tools",
+    "ground_truth"
+  ],
+  "properties": {
+    "sample_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "split": {
+      "type": "string",
+      "enum": ["train", "val", "test"]
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uri"],
+      "properties": {
+        "uri": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string" },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "single_agent": {
+      "type": "boolean",
+      "const": true
+    },
+    "allowed_tools": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["PZ", "CR"]
+      },
+      "uniqueItems": true,
+      "minItems": 1
+    },
+    "ground_truth": {
+      "$ref": "final_answer.schema.json"
+    }
+  }
+}

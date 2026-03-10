@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentiad/trajectory.schema.json",
+  "title": "AgentIADTrajectory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "trajectory_id",
+    "sample_id",
+    "stage",
+    "agent_mode",
+    "tool_path",
+    "steps",
+    "final_answer"
+  ],
+  "properties": {
+    "trajectory_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sample_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["sft", "grpo"]
+    },
+    "agent_mode": {
+      "type": "string",
+      "const": "single_agent"
+    },
+    "tool_path": {
+      "type": "string",
+      "enum": ["pz_only", "pz_cr"]
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["step_index", "step_type"],
+        "properties": {
+          "step_index": { "type": "integer", "minimum": 0 },
+          "step_type": {
+            "type": "string",
+            "enum": ["reasoning", "tool_call", "observation"]
+          },
+          "tool_call": {
+            "$ref": "tool_call.schema.json"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "final_answer": {
+      "$ref": "final_answer.schema.json"
+    }
+  }
+}

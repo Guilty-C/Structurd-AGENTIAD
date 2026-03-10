@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentiad/run_metadata.schema.json",
+  "title": "AgentIADRunMetadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "phase",
+    "boundary",
+    "config_hashes",
+    "script_hashes",
+    "dataset_manifest_hash",
+    "notes"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "phase": {
+      "type": "string",
+      "enum": ["scaffold", "sft", "grpo", "eval"]
+    },
+    "boundary": {
+      "type": "string",
+      "enum": ["local", "remote"]
+    },
+    "config_hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "script_hashes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "dataset_manifest_hash": {
+      "type": ["string", "null"]
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

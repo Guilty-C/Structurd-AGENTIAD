@@ -1,0 +1,41 @@
+{
+  "prompt_checkpoint": "1.1",
+  "locked_on": "2026-03-10",
+  "project_mode": "clean_room_reconstruction",
+  "owners": {
+    "sft": {
+      "owner": "MS-Swift",
+      "rationale": "Maintained SFT framework with standard training ownership kept outside custom AgentIAD code."
+    },
+    "grpo_rl": {
+      "owner": "VERL",
+      "rationale": "Maintained RL/GRPO framework with rollout and optimizer ownership kept outside custom AgentIAD code."
+    },
+    "inference_serving": {
+      "owner": "vLLM",
+      "fallback_owner": "transformers_local_wrapper",
+      "rationale": "Use a maintained inference stack for serving paths; allow a minimal local wrapper only for lightweight smoke validation."
+    }
+  },
+  "ownership_boundaries": {
+    "framework_owned": [
+      "training_runtime",
+      "checkpoint_management",
+      "optimizer_and_scheduler",
+      "distributed_rollout",
+      "serving_runtime"
+    ],
+    "adapter_owned": [
+      "mmad_to_contract_mapping",
+      "pz_adapter",
+      "cr_adapter",
+      "prompt_answer_trace_binding"
+    ],
+    "fully_custom": [
+      "canonical_contracts",
+      "reward_decomposition_bundle",
+      "reproducibility_manifests",
+      "audit_outputs"
+    ]
+  }
+}
