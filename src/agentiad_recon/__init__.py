@@ -10,8 +10,10 @@ __all__ = [
     "baseline",
     "evaluation",
     "mmad",
+    "ms_swift_adapter",
     "prompting",
     "reproducibility",
+    "sft",
     "tooling",
     "traces",
 ]

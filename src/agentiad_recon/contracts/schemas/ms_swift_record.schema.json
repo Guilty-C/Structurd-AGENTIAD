@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/ms_swift_record.schema.json",
+  "title": "AgentIADMSSwiftRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "messages",
+    "images",
+    "tools",
+    "metadata"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "content", "loss"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["system", "user", "assistant", "tool"]
+          },
+          "content": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["type"],
+              "properties": {
+                "type": { "type": "string", "enum": ["text", "image"] },
+                "text": { "type": "string" },
+                "image": { "type": "string" }
+              }
+            }
+          },
+          "loss": { "type": "boolean" },
+          "tool_name": { "type": "string" },
+          "call_id": { "type": "string" }
+        }
+      }
+    },
+    "images": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description"],
+        "properties": {
+          "name": { "type": "string", "enum": ["PZ", "CR"] },
+          "description": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_id", "trajectory_mode", "top_anomaly", "loss_message_indices"],
+      "properties": {
+        "sample_id": { "type": "string", "minLength": 1 },
+        "trajectory_mode": { "type": "string", "enum": ["pz_only", "pz_cr"] },
+        "top_anomaly": { "type": ["string", "null"] },
+        "loss_message_indices": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

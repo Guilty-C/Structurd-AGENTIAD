@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/sft_export_definition.schema.json",
+  "title": "AgentIADSFTExportDefinition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "execution_boundary",
+    "sample_source",
+    "trajectory_modes",
+    "output"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "execution_boundary": {
+      "type": "string",
+      "enum": ["local_only", "remote_only"]
+    },
+    "sample_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "source_name", "splits", "max_samples_per_mode"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["fixture", "mmad"]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "splits": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": ["train", "val", "test"]
+          }
+        },
+        "max_samples_per_mode": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        }
+      }
+    },
+    "trajectory_modes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": ["pz_only", "pz_cr"]
+      },
+      "allOf": [
+        {
+          "contains": {
+            "const": "pz_only"
+          }
+        },
+        {
+          "contains": {
+            "const": "pz_cr"
+          }
+        }
+      ]
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "canonical_dataset", "manifest"],
+      "properties": {
+        "root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonical_dataset": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

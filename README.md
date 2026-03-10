@@ -98,6 +98,34 @@ Mode split:
 
 Prompt 1.4 remains local-only and mock-backed. The scripted backend is only there to validate loop structure, stop conditions, tool usage accounting, and artifact generation. It is not real VLM inference.
 
+## Trajectory Reconstruction For SFT
+
+Prompt 1.5 builds the first canonical SFT-facing layer on top of the existing tool waist instead of inventing a parallel export stack:
+
+Trajectory reconstruction for SFT is now part of the local audited repo state.
+
+- `src/agentiad_recon/sft.py` reuses the Prompt 1.4 prompt, tool, and trace contracts to export both `pz_only` and `pz_cr` trajectories as one unified SFT dataset
+- `src/agentiad_recon/ms_swift_adapter.py` adds a thin MS-Swift adapter/config layer rather than a custom trainer
+- `configs/sft_export_fixture.json` freezes the local fixture-backed SFT export definition
+- `configs/ms_swift_sft_fixture.json` freezes the local MS-Swift adapter recipe
+- `configs/ms_swift_sft_remote_template.json` freezes the remote-only full-SFT template without executing it locally
+
+The unified Prompt 1.5 dataset contract keeps these fields explicit and auditable:
+
+- trajectory mode: `pz_only` or `pz_cr`
+- ordered messages with image bindings and tool events
+- exemplar linkage for `CR`
+- prompt/parser/trajectory versions
+- decisive-turn loss mask for the last visual operation and final reasoning step
+- final answer alignment using the locked `anomaly_present`, `top_anomaly`, and `visual_descriptions` contract
+
+PZ-only versus PZ+CR training data split:
+
+- `pz_only`: pre-zoom reasoning, one `PZ` tool call, post-zoom reasoning, final answer alignment
+- `pz_cr`: pre-zoom reasoning, `PZ`, post-zoom reasoning, `CR`, comparative rethinking, final answer alignment
+
+MS-Swift remains the SFT owner in Prompt 1.5. The repo only exports a framework-facing dataset plus externalized training surfaces for dataset path plumbing, LoRA settings, checkpoints, logging, and resume behavior. Full SFT is remote-only.
+
 ## Phase Flow
 
 1. Define canonical MMAD-backed samples and audit manifests locally.
@@ -115,6 +143,9 @@ Local machine responsibilities in this prompt:
 - prompt, answer, and trace contract implementation
 - non-tool baseline inference and evaluator plumbing
 - tool-enabled `pz_only` and `pz_cr` smoke-validation plumbing
+- SFT trajectory export for `pz_only` and `pz_cr`
+- unified SFT dataset hashing, manifests, and masking validation
+- thin MS-Swift adapter/config validation
 - lightweight fixture validation and static checks
 
 Remote server responsibilities later:
@@ -131,8 +162,13 @@ Remote server responsibilities later:
 - Fixture validation path: use the tiny MMAD-style fixture under [tests/fixtures/mmad_fixture](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/tests/fixtures/mmad_fixture) to smoke-test indexing, export, PZ, CR, prompt contracts, answer parsing, and trace serialization locally.
 - Baseline fixture definition: [configs/baseline_non_tool_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/baseline_non_tool_fixture.json) freezes the local-only mock-backed baseline run definition.
 - Tool-enabled fixture definitions: [configs/tool_pz_only_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/tool_pz_only_fixture.json) and [configs/tool_pz_cr_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/tool_pz_cr_fixture.json) freeze the local-only scripted smoke runs for `pz_only` and `pz_cr`.
+- SFT fixture export definition: [configs/sft_export_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/sft_export_fixture.json) freezes the local-only Prompt 1.5 export contract for unified `pz_only` plus `pz_cr` training trajectories.
+- MS-Swift local recipe: [configs/ms_swift_sft_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/ms_swift_sft_fixture.json) freezes the local adapter surface and tiny sanity settings.
+- MS-Swift remote template: [configs/ms_swift_sft_remote_template.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/ms_swift_sft_remote_template.json) freezes the remote-only full-SFT config package.
 - Delta-vs-baseline artifacts from Prompt 1.4 are structural local smoke evidence only; they do not claim tool quality gains on real models.
-- Deferred work: real maintained-runtime baseline execution, real maintained-runtime tool-enabled inference, SFT export at scale, GRPO rollout, and dataset-wide evaluation remain remote/server-phase work.
+- Prompt 1.5 local validation covers schema checks, message ordering, image/reference binding checks, exemplar linkage checks, decisive-turn loss mask checks, and MS-Swift recipe projection checks.
+- Prompt 1.5 does not run MS-Swift locally. If the runtime is unavailable, the adapter reports that honestly and stops after format/config validation.
+- Deferred work: real maintained-runtime baseline execution, real maintained-runtime tool-enabled inference, full SFT, GRPO rollout, and dataset-wide evaluation remain remote/server-phase work.
 
 ## Audit Visibility
 

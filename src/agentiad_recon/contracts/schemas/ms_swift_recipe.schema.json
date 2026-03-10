@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/ms_swift_recipe.schema.json",
+  "title": "AgentIADMSSwiftRecipe",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "recipe_name",
+    "framework_owner",
+    "dataset",
+    "training",
+    "logging",
+    "resume"
+  ],
+  "properties": {
+    "recipe_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "framework_owner": {
+      "type": "string",
+      "const": "ms-swift"
+    },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["output_jsonl", "manifest_json", "dataset_name", "tools"],
+      "properties": {
+        "output_jsonl": { "type": "string", "minLength": 1 },
+        "manifest_json": { "type": "string", "minLength": 1 },
+        "dataset_name": { "type": "string", "minLength": 1 },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "description"],
+            "properties": {
+              "name": { "type": "string", "enum": ["PZ", "CR"] },
+              "description": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "training": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_id_or_path",
+        "train_type",
+        "lora_rank",
+        "lora_alpha",
+        "num_train_epochs",
+        "per_device_train_batch_size",
+        "gradient_accumulation_steps",
+        "learning_rate",
+        "max_length",
+        "checkpoint_dir"
+      ],
+      "properties": {
+        "model_id_or_path": { "type": "string", "minLength": 1 },
+        "train_type": { "type": "string", "enum": ["lora", "full"] },
+        "lora_rank": { "type": "integer", "minimum": 1 },
+        "lora_alpha": { "type": "integer", "minimum": 1 },
+        "num_train_epochs": { "type": "integer", "minimum": 1 },
+        "per_device_train_batch_size": { "type": "integer", "minimum": 1 },
+        "gradient_accumulation_steps": { "type": "integer", "minimum": 1 },
+        "learning_rate": { "type": "number", "exclusiveMinimum": 0 },
+        "max_length": { "type": "integer", "minimum": 1 },
+        "checkpoint_dir": { "type": "string", "minLength": 1 }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logging_dir", "logging_steps", "report_to"],
+      "properties": {
+        "logging_dir": { "type": "string", "minLength": 1 },
+        "logging_steps": { "type": "integer", "minimum": 1 },
+        "report_to": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "resume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resume_from_checkpoint", "load_args_from_ckpt_dir"],
+      "properties": {
+        "resume_from_checkpoint": { "type": ["string", "null"] },
+        "load_args_from_ckpt_dir": { "type": "boolean" }
+      }
+    }
+  }
+}

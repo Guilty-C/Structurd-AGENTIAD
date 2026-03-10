@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/sft_dataset_record.schema.json",
+  "title": "AgentIADSFTDatasetRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "trajectory_id",
+    "sample_id",
+    "trajectory_mode",
+    "sample",
+    "versions",
+    "messages",
+    "tool_events",
+    "final_answer",
+    "loss_summary",
+    "metadata"
+  ],
+  "properties": {
+    "trajectory_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sample_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "trajectory_mode": {
+      "type": "string",
+      "enum": ["pz_only", "pz_cr"]
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "split",
+        "category",
+        "anomaly_present",
+        "top_anomaly",
+        "anomaly_candidates",
+        "primary_image_uri",
+        "primary_image_sha256",
+        "metadata"
+      ],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "split": { "type": "string", "enum": ["train", "val", "test"] },
+        "category": { "type": "string", "minLength": 1 },
+        "anomaly_present": { "type": "boolean" },
+        "top_anomaly": { "type": ["string", "null"] },
+        "anomaly_candidates": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "primary_image_uri": { "type": "string", "minLength": 1 },
+        "primary_image_sha256": { "type": "string", "minLength": 1 },
+        "metadata": { "type": "object" }
+      }
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt_version", "parser_version", "trajectory_version", "dataset_version"],
+      "properties": {
+        "prompt_version": { "type": "string", "minLength": 1 },
+        "parser_version": { "type": "string", "minLength": 1 },
+        "trajectory_version": { "type": "string", "minLength": 1 },
+        "dataset_version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "messages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "message_index",
+          "role",
+          "message_type",
+          "content",
+          "image_refs",
+          "tool_name",
+          "call_id",
+          "loss_mask",
+          "decisive_turn",
+          "loss_reason",
+          "metadata"
+        ],
+        "properties": {
+          "message_index": { "type": "integer", "minimum": 0 },
+          "role": { "type": "string", "enum": ["system", "user", "assistant", "tool"] },
+          "message_type": {
+            "type": "string",
+            "enum": [
+              "system_instruction",
+              "user_prompt",
+              "reasoning",
+              "tool_request",
+              "tool_result",
+              "final_answer"
+            ]
+          },
+          "content": { "type": "string" },
+          "image_refs": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "tool_name": { "type": ["string", "null"] },
+          "call_id": { "type": ["string", "null"] },
+          "loss_mask": { "type": "boolean" },
+          "decisive_turn": { "type": "boolean" },
+          "loss_reason": {
+            "type": "string",
+            "enum": ["none", "last_visual_operation", "final_reasoning", "final_answer_alignment"]
+          },
+          "metadata": { "type": "object" }
+        }
+      }
+    },
+    "tool_events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "call_id",
+          "tool_name",
+          "arguments",
+          "output_ref",
+          "output_payload",
+          "image_bindings",
+          "status"
+        ],
+        "properties": {
+          "call_id": { "type": "string", "minLength": 1 },
+          "tool_name": { "type": "string", "enum": ["PZ", "CR"] },
+          "arguments": { "type": "object" },
+          "output_ref": { "type": "object" },
+          "output_payload": { "type": "object" },
+          "image_bindings": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "status": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "final_answer": {
+      "$ref": "final_answer.schema.json"
+    },
+    "loss_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["loss_message_indices", "decisive_message_indices", "loss_rule"],
+      "properties": {
+        "loss_message_indices": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "decisive_message_indices": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "loss_rule": { "type": "string", "minLength": 1 }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_mode", "tool_path", "hash_basis"],
+      "properties": {
+        "agent_mode": { "type": "string", "const": "single_agent" },
+        "tool_path": { "type": "string", "enum": ["pz_only", "pz_cr"] },
+        "hash_basis": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

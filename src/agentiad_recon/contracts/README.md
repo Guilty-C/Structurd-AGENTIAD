@@ -17,6 +17,11 @@ Locked schemas:
 - `baseline_run_summary.schema.json`: one canonical baseline evidence summary manifest
 - `tool_run_definition.schema.json`: one canonical tool-enabled run config for `pz_only` and `pz_cr`
 - `tool_delta_report.schema.json`: one canonical delta-vs-baseline comparison artifact
+- `sft_export_definition.schema.json`: one canonical Prompt 1.5 SFT export definition
+- `sft_dataset_record.schema.json`: one unified SFT dataset row covering message order, tool events, image bindings, and loss masks
+- `sft_dataset_manifest.schema.json`: one hashable manifest for either canonical or MS-Swift-facing SFT dataset exports
+- `ms_swift_recipe.schema.json`: one thin MS-Swift config surface covering dataset plumbing, LoRA knobs, checkpoints, logging, and resume
+- `ms_swift_record.schema.json`: one thin MS-Swift-facing dataset row projected from the canonical Prompt 1.5 record
 
 Scientific constraints expressed by these schemas:
 
@@ -24,4 +29,6 @@ Scientific constraints expressed by these schemas:
 - the tool surface is limited to `PZ` and `CR`
 - eval traces may explicitly declare `no_tools` for the baseline path
 - trajectories must declare either `pz_only` or `pz_cr`
+- SFT exports must preserve both `pz_only` and `pz_cr` trajectories in one unified contract
+- decisive-turn supervision must stay explicit for the last visual operation and final reasoning step
 - reward input is decomposed into perception and behavior channels

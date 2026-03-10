@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/sft_dataset_manifest.schema.json",
+  "title": "AgentIADSFTDatasetManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_count"
+  ],
+  "properties": {
+    "dataset_version": { "type": "string" },
+    "record_count": { "type": "integer", "minimum": 1 },
+    "trajectory_modes": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["pz_only", "pz_cr"] }
+    },
+    "sample_count_per_mode": { "type": "integer", "minimum": 1 },
+    "canonical_dataset_path": { "type": "string" },
+    "canonical_dataset_sha256": { "type": "string" },
+    "ordering": { "type": "string" },
+    "boundary": { "type": "string" },
+    "config_hash": { "type": "string" },
+    "recipe_name": { "type": "string" },
+    "swift_dataset_path": { "type": "string" },
+    "swift_dataset_sha256": { "type": "string" },
+    "runtime_probe": { "type": "object" },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

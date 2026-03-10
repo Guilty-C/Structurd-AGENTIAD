@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
-from jsonschema.validators import RefResolver
+from referencing import Registry, Resource
 
 
 SCHEMA_ROOT = Path(__file__).resolve().parent / "schemas"
@@ -25,18 +25,16 @@ class ContractValidationError(ValueError):
 
 
 @lru_cache(maxsize=1)
-def _schema_store() -> dict[str, dict[str, Any]]:
-    """Load all local schemas once so `$ref` resolution stays deterministic."""
+def _schema_resources() -> Registry:
+    """Load local schemas into one registry so `$ref` resolution stays deterministic."""
 
-    store: dict[str, dict[str, Any]] = {}
+    pairs: list[tuple[str, Resource[Any]]] = []
     for path in sorted(SCHEMA_ROOT.glob("*.schema.json")):
         schema = json.loads(path.read_text(encoding="utf-8"))
-        store[path.name] = schema
-        store[path.as_uri()] = schema
         schema_id = schema.get("$id")
         if schema_id:
-            store[schema_id] = schema
-    return store
+            pairs.append((schema_id, Resource.from_contents(schema)))
+    return Registry().with_resources(pairs)
 
 
 def load_schema(schema_name: str) -> dict[str, Any]:
@@ -51,8 +49,7 @@ def _validator_for(schema_name: str) -> Draft202012Validator:
     """Create a cached validator with local reference resolution enabled."""
 
     schema = load_schema(schema_name)
-    resolver = RefResolver(base_uri=f"{SCHEMA_ROOT.as_uri()}/", referrer=schema, store=_schema_store())
-    return Draft202012Validator(schema, resolver=resolver)
+    return Draft202012Validator(schema, registry=_schema_resources())
 
 
 def _format_error(error: Any) -> str:

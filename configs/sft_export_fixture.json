@@ -1,0 +1,17 @@
+{
+  "run_id": "prompt_1_5_sft_fixture_export_v1",
+  "execution_boundary": "local_only",
+  "sample_source": {
+    "kind": "fixture",
+    "path": "tests/fixtures/mmad_fixture",
+    "source_name": "mmad_fixture",
+    "splits": ["train"],
+    "max_samples_per_mode": 2
+  },
+  "trajectory_modes": ["pz_only", "pz_cr"],
+  "output": {
+    "root": "dist/outputs/prompt_1_5_sft_fixture",
+    "canonical_dataset": "prompt_1_5_sft_dataset.jsonl",
+    "manifest": "prompt_1_5_sft_dataset.manifest.json"
+  }
+}
