@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "agentiad/tool_call.schema.json",
+  "$id": "https://agentiad.local/tool_call.schema.json",
   "title": "AgentIADToolCall",
   "type": "object",
   "additionalProperties": false,
@@ -9,7 +9,8 @@
     "tool_name",
     "status",
     "arguments",
-    "output_ref"
+    "output_ref",
+    "output_payload"
   ],
   "properties": {
     "call_id": {
@@ -25,7 +26,8 @@
       "enum": ["requested", "completed", "failed"]
     },
     "arguments": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": true
     },
     "output_ref": {
       "type": "object",
@@ -34,6 +36,19 @@
       "properties": {
         "artifact_id": { "type": "string", "minLength": 1 },
         "sha256": { "type": "string" }
+      }
+    },
+    "output_payload": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "raw_text": {
+      "type": "string"
+    },
+    "audit_log": {
+      "type": "array",
+      "items": {
+        "type": "string"
       }
     }
   }

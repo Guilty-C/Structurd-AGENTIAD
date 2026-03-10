@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "agentiad/final_answer.schema.json",
+  "$id": "https://agentiad.local/final_answer.schema.json",
   "title": "AgentIADFinalAnswer",
   "type": "object",
   "additionalProperties": false,

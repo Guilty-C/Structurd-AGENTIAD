@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "agentiad/reward_input.schema.json",
+  "$id": "https://agentiad.local/reward_input.schema.json",
   "title": "AgentIADRewardInput",
   "type": "object",
   "additionalProperties": false,

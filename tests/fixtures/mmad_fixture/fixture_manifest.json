@@ -1,0 +1,8 @@
+{
+  "fixture": true,
+  "name": "Prompt 1.2 MMAD local fixture",
+  "notes": [
+    "This fixture is intentionally tiny and is not a stand-in for full MMAD coverage.",
+    "It exists only for local smoke validation of indexing, PZ, CR, prompt, answer, and trace contracts."
+  ]
+}

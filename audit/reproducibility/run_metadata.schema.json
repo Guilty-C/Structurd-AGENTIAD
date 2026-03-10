@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "agentiad/run_metadata.schema.json",
+  "$id": "https://agentiad.local/run_metadata.schema.json",
   "title": "AgentIADRunMetadata",
   "type": "object",
   "additionalProperties": false,

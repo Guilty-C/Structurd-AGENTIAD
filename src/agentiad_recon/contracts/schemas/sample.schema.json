@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "agentiad/sample.schema.json",
+  "$id": "https://agentiad.local/sample.schema.json",
   "title": "AgentIADSample",
   "type": "object",
   "additionalProperties": false,
@@ -8,10 +8,16 @@
     "sample_id",
     "split",
     "source",
+    "category",
+    "anomaly_present",
+    "anomaly_candidates",
     "image",
+    "mask",
+    "roi_source",
     "single_agent",
     "allowed_tools",
-    "ground_truth"
+    "ground_truth",
+    "metadata"
   ],
   "properties": {
     "sample_id": {
@@ -26,15 +32,55 @@
       "type": "string",
       "minLength": 1
     },
+    "category": {
+      "type": "string",
+      "minLength": 1
+    },
+    "anomaly_present": {
+      "type": "boolean"
+    },
+    "anomaly_candidates": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["uri"],
+      "required": ["uri", "relative_path"],
       "properties": {
         "uri": { "type": "string", "minLength": 1 },
+        "relative_path": { "type": "string", "minLength": 1 },
         "sha256": { "type": "string" },
         "width": { "type": "integer", "minimum": 1 },
         "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "mask": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["uri", "relative_path"],
+      "properties": {
+        "uri": { "type": "string", "minLength": 1 },
+        "relative_path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string" }
+      }
+    },
+    "roi_source": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["kind", "description"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["mask", "none"]
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "uri": { "type": "string" },
+        "relative_path": { "type": "string" }
       }
     },
     "single_agent": {
@@ -52,6 +98,10 @@
     },
     "ground_truth": {
       "$ref": "final_answer.schema.json"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
     }
   }
 }

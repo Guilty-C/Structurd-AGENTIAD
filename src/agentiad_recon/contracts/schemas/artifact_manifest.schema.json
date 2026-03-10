@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "agentiad/artifact_manifest.schema.json",
+  "$id": "https://agentiad.local/artifact_manifest.schema.json",
   "title": "AgentIADArtifactManifest",
   "type": "object",
   "additionalProperties": false,

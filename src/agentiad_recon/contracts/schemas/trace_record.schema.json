@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/trace_record.schema.json",
+  "title": "AgentIADAuditTraceRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "trace_id",
+    "sample_id",
+    "stage",
+    "agent_mode",
+    "tool_path",
+    "storage_purpose",
+    "messages",
+    "tool_traces",
+    "final_answer",
+    "metadata"
+  ],
+  "properties": {
+    "trace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sample_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["sft", "grpo", "eval"]
+    },
+    "agent_mode": {
+      "type": "string",
+      "const": "single_agent"
+    },
+    "tool_path": {
+      "type": "string",
+      "enum": ["pz_only", "pz_cr"]
+    },
+    "storage_purpose": {
+      "type": "string",
+      "enum": ["training", "eval"]
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "message_type", "content", "image_refs", "metadata"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["system", "user", "assistant", "tool"]
+          },
+          "message_type": {
+            "type": "string",
+            "enum": [
+              "system_instruction",
+              "user_prompt",
+              "reasoning",
+              "tool_request",
+              "tool_result",
+              "final_answer"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "image_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tool_name": {
+            "type": ["string", "null"],
+            "enum": ["PZ", "CR", null]
+          },
+          "call_id": {
+            "type": ["string", "null"]
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "tool_traces": {
+      "type": "array",
+      "items": {
+        "$ref": "tool_call.schema.json"
+      }
+    },
+    "final_answer": {
+      "type": ["object", "null"]
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

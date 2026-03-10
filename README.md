@@ -38,6 +38,23 @@ The reconstruction is constrained by the following non-negotiables:
 
 These targets are frozen in [audit/scientific_target_lock.md](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/audit/scientific_target_lock.md) and reflected in the canonical schemas under [src/agentiad_recon/contracts/schemas](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/contracts/schemas).
 
+## Canonical Runtime Waist
+
+Prompt 1.2 extends the scaffold with one canonical local runtime waist:
+
+1. MMAD sample in through [src/agentiad_recon/mmad.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/mmad.py)
+2. prompt contract out through [src/agentiad_recon/prompting.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/prompting.py)
+3. deterministic tool execution through [src/agentiad_recon/tooling.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/tooling.py)
+4. strict final answer parsing back into the canonical final-answer schema
+5. audit-ready traces through [src/agentiad_recon/traces.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/traces.py)
+
+The local plumbing is intentionally narrow:
+
+- the MMAD layer indexes real dataset paths when available, but Prompt 1.2 only validates against a tiny fixture dataset
+- PZ is a deterministic crop adapter, not a vision model
+- CR is a deterministic same-category normal exemplar selector, not an ANN retrieval system
+- prompt and answer handling are contract-first and versioned for later framework integration
+
 ## Phase Flow
 
 1. Define canonical MMAD-backed samples and audit manifests locally.
@@ -49,15 +66,23 @@ These targets are frozen in [audit/scientific_target_lock.md](/home/zbr/project/
 ## Local vs Remote Boundary
 
 Local machine responsibilities in this prompt:
-- architecture, schema, and reproducibility lock
-- scaffold normalization
-- lightweight validation and static checks
+- architecture and contract lock
+- MMAD canonical sample indexing and export
+- deterministic PZ and CR tool adapters
+- prompt, answer, and trace contract implementation
+- lightweight fixture validation and static checks
 
 Remote server responsibilities later:
 - model downloads if large
 - SFT training
 - GRPO training
 - full MMAD-scale inference and evaluation
+
+## Fixture vs Real Dataset Paths
+
+- Real dataset path: pass an explicit MMAD root or set `AGENTIAD_MMAD_ROOT`; the indexer will only report what it can actually discover on disk.
+- Fixture validation path: use the tiny MMAD-style fixture under [tests/fixtures/mmad_fixture](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/tests/fixtures/mmad_fixture) to smoke-test indexing, export, PZ, CR, prompt contracts, answer parsing, and trace serialization locally.
+- Deferred work: baseline inference, tool-enabled inference loops, SFT export at scale, GRPO rollout, and dataset-wide evaluation remain remote/server-phase work.
 
 ## Audit Visibility
 
