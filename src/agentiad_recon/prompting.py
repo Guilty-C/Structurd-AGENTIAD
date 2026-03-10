@@ -1,9 +1,11 @@
 """Prompt and final-answer contract helpers for AgentIAD.
 
-This module freezes the local prompt contract used by later inference and tool
-loops. It keeps task wording versioned, makes the two tool settings explicit,
-and parses the final XML-like answer block back into the canonical final-answer
-schema with loud, informative failures when the contract is broken.
+This module keeps one versioned prompt family for both tool-aware and baseline
+evaluation paths. Prompt 1.3 extends the prompt surface with a non-tool
+baseline variant that uses `<think>` and `<answer>` blocks while reusing the
+same strict final-answer parser and canonical final-answer schema. There is no
+CLI here; import the builders or run `python -m agentiad_recon.baseline --help`
+for the baseline entrypoint that consumes these helpers.
 """
 
 from __future__ import annotations
@@ -17,6 +19,8 @@ from agentiad_recon.contracts import validate_payload
 
 
 PROMPT_VERSION = "agentiad_prompt_v1_2"
+BASELINE_PROMPT_VERSION = "agentiad_baseline_prompt_v1_3"
+FINAL_ANSWER_PARSER_VERSION = "agentiad_final_answer_parser_v1_3"
 FINAL_ANSWER_TEMPLATE = """<final_answer>
   <anomaly_present>true|false</anomaly_present>
   <top_anomaly>anomaly_label_or_null</top_anomaly>
@@ -24,6 +28,16 @@ FINAL_ANSWER_TEMPLATE = """<final_answer>
     <item>short visual fact</item>
   </visual_descriptions>
 </final_answer>"""
+BASELINE_ANSWER_TEMPLATE = """<think>
+short reasoning notes
+</think>
+<answer>
+  <anomaly_present>true|false</anomaly_present>
+  <top_anomaly>anomaly_label_or_null</top_anomaly>
+  <visual_descriptions>
+    <item>short visual fact</item>
+  </visual_descriptions>
+</answer>"""
 TOOL_CALL_TEMPLATE = """<tool_call>
 {"tool_name":"PZ","arguments":{"bbox":{"x0":0.10,"y0":0.10,"x1":0.80,"y1":0.80}}}
 </tool_call>"""
@@ -107,13 +121,99 @@ def build_prompt(sample: dict[str, Any], *, tool_path: str) -> PromptBundle:
     )
 
 
-def _extract_block(text: str) -> str:
-    """Extract the XML-like final-answer block from a model response."""
+def build_baseline_prompt(sample: dict[str, Any]) -> PromptBundle:
+    """Build the versioned non-tool baseline prompt used in Prompt 1.3.
 
-    match = re.search(r"<final_answer>.*?</final_answer>", text, flags=re.DOTALL)
+    The baseline contract omits tools entirely, preserves the same anomaly
+    field semantics, and requests the paper-aligned `<think>` plus `<answer>`
+    wrapper format expected by the baseline evaluator.
+    """
+
+    image_rule = (
+        f"Primary image: {sample['image']['uri']}. "
+        "No tool use is available in this baseline mode, so reason from the primary image only."
+    )
+    system_message = (
+        f"You are a single-agent anomaly inspector. Prompt version: {BASELINE_PROMPT_VERSION}. "
+        "Tools are disabled in this run. Use only the primary image context in the prompt. "
+        "Return exactly one `<think>` block followed by one `<answer>` block in this format:\n"
+        f"{BASELINE_ANSWER_TEMPLATE}"
+    )
+    user_message = (
+        f"Sample id: {sample['sample_id']}\n"
+        f"Category: {sample['category']}\n"
+        f"{_candidate_line(list(sample['anomaly_candidates']))}\n"
+        f"{image_rule}"
+    )
+    return PromptBundle(
+        prompt_version=BASELINE_PROMPT_VERSION,
+        tool_path="no_tools",
+        messages=[
+            {
+                "role": "system",
+                "message_type": "system_instruction",
+                "content": system_message,
+                "image_refs": [],
+                "metadata": {},
+            },
+            {
+                "role": "user",
+                "message_type": "user_prompt",
+                "content": user_message,
+                "image_refs": [sample["image"]["uri"]],
+                "metadata": {"prompt_version": BASELINE_PROMPT_VERSION},
+            },
+        ],
+        stop_sequences=["</answer>"],
+    )
+
+
+def extract_think_block(text: str) -> str | None:
+    """Extract an optional `<think>` block for audit traces."""
+
+    match = re.search(r"<think>(.*?)</think>", text, flags=re.DOTALL)
     if not match:
-        raise FinalAnswerContractError("No <final_answer> block found in model output")
-    return match.group(0)
+        return None
+    content = match.group(1).strip()
+    return content or None
+
+
+def render_answer_block(
+    answer: dict[str, Any],
+    *,
+    wrapper_tag: str = "answer",
+    think: str | None = None,
+) -> str:
+    """Render a canonical answer payload as XML-like assistant output text."""
+
+    visual_items = "\n".join(
+        f"    <item>{description}</item>" for description in answer["visual_descriptions"]
+    )
+    if not visual_items:
+        visual_items = "    "
+    top_anomaly = "null" if answer["top_anomaly"] is None else answer["top_anomaly"]
+    answer_block = (
+        f"<{wrapper_tag}>\n"
+        f"  <anomaly_present>{str(answer['anomaly_present']).lower()}</anomaly_present>\n"
+        f"  <top_anomaly>{top_anomaly}</top_anomaly>\n"
+        f"  <visual_descriptions>\n"
+        f"{visual_items}\n"
+        f"  </visual_descriptions>\n"
+        f"</{wrapper_tag}>"
+    )
+    if think is None:
+        return answer_block
+    return f"<think>\n{think}\n</think>\n{answer_block}"
+
+
+def _extract_block(text: str) -> str:
+    """Extract either the legacy or baseline final-answer block from a response."""
+
+    for tag in ("final_answer", "answer"):
+        match = re.search(fr"<{tag}>.*?</{tag}>", text, flags=re.DOTALL)
+        if match:
+            return match.group(0)
+    raise FinalAnswerContractError("No <final_answer> or <answer> block found in model output")
 
 
 def _parse_bool(text: str) -> bool:
@@ -168,6 +268,9 @@ def parse_final_answer(text: str) -> dict[str, Any]:
         root = ET.fromstring(block)
     except ET.ParseError as exc:
         raise FinalAnswerContractError(f"Malformed <final_answer> XML block: {exc}") from exc
+
+    if root.tag not in {"final_answer", "answer"}:
+        raise FinalAnswerContractError(f"Unsupported final-answer root tag: {root.tag}")
 
     anomaly_node = root.findtext("anomaly_present")
     top_anomaly = _normalize_top_anomaly(root.findtext("top_anomaly"))

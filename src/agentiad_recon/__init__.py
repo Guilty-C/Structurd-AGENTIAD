@@ -6,6 +6,9 @@ and reproducibility metadata without introducing bespoke trainer machinery.
 """
 
 __all__ = [
+    "backends",
+    "baseline",
+    "evaluation",
     "mmad",
     "prompting",
     "reproducibility",

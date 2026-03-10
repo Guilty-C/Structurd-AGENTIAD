@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/baseline_prediction_record.schema.json",
+  "title": "AgentIADBaselinePredictionRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_id",
+    "run_id",
+    "sample_id",
+    "split",
+    "category",
+    "seed",
+    "tool_mode",
+    "prompt_version",
+    "parser_version",
+    "backend_name",
+    "parser_valid",
+    "schema_valid",
+    "prediction",
+    "ground_truth",
+    "error_message",
+    "raw_output_path",
+    "raw_output_sha256",
+    "trace_path",
+    "metadata"
+  ],
+  "properties": {
+    "record_id": { "type": "string", "minLength": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "sample_id": { "type": "string", "minLength": 1 },
+    "split": {
+      "type": "string",
+      "enum": ["train", "val", "test"]
+    },
+    "category": { "type": "string", "minLength": 1 },
+    "seed": { "type": "integer" },
+    "tool_mode": {
+      "type": "string",
+      "const": "no_tools"
+    },
+    "prompt_version": { "type": "string", "minLength": 1 },
+    "parser_version": { "type": "string", "minLength": 1 },
+    "backend_name": { "type": "string", "minLength": 1 },
+    "parser_valid": { "type": "boolean" },
+    "schema_valid": { "type": "boolean" },
+    "prediction": {
+      "anyOf": [
+        { "$ref": "final_answer.schema.json" },
+        { "type": "null" }
+      ]
+    },
+    "ground_truth": {
+      "$ref": "final_answer.schema.json"
+    },
+    "error_message": {
+      "type": ["string", "null"]
+    },
+    "raw_output_path": { "type": "string", "minLength": 1 },
+    "raw_output_sha256": { "type": "string", "minLength": 1 },
+    "trace_path": { "type": "string", "minLength": 1 },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

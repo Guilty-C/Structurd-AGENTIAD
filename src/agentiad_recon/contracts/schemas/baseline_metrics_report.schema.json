@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/baseline_metrics_report.schema.json",
+  "title": "AgentIADBaselineMetricsReport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "tool_mode",
+    "prompt_version",
+    "parser_version",
+    "backend_name",
+    "seeds",
+    "per_seed_metrics",
+    "per_class_metrics",
+    "aggregate_metrics"
+  ],
+  "properties": {
+    "run_id": { "type": "string", "minLength": 1 },
+    "tool_mode": {
+      "type": "string",
+      "const": "no_tools"
+    },
+    "prompt_version": { "type": "string", "minLength": 1 },
+    "parser_version": { "type": "string", "minLength": 1 },
+    "backend_name": { "type": "string", "minLength": 1 },
+    "seeds": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 1
+    },
+    "per_seed_metrics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/metricRecord"
+      }
+    },
+    "per_class_metrics": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/metricRecord"
+      }
+    },
+    "aggregate_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parser_valid_rate",
+        "schema_valid_rate",
+        "anomaly_present_accuracy",
+        "top_anomaly_accuracy"
+      ],
+      "properties": {
+        "parser_valid_rate": { "$ref": "#/$defs/meanStd" },
+        "schema_valid_rate": { "$ref": "#/$defs/meanStd" },
+        "anomaly_present_accuracy": { "$ref": "#/$defs/meanStd" },
+        "top_anomaly_accuracy": { "$ref": "#/$defs/meanStd" }
+      }
+    }
+  },
+  "$defs": {
+    "metricRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "scope_name",
+        "sample_count",
+        "parser_valid_count",
+        "schema_valid_count",
+        "parser_valid_rate",
+        "schema_valid_rate",
+        "anomaly_present_accuracy",
+        "top_anomaly_accuracy"
+      ],
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": ["seed", "class"]
+        },
+        "scope_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seed": {
+          "type": ["integer", "null"]
+        },
+        "category": {
+          "type": ["string", "null"]
+        },
+        "sample_count": { "type": "integer", "minimum": 0 },
+        "parser_valid_count": { "type": "integer", "minimum": 0 },
+        "schema_valid_count": { "type": "integer", "minimum": 0 },
+        "parser_valid_rate": { "type": "number" },
+        "schema_valid_rate": { "type": "number" },
+        "anomaly_present_accuracy": { "type": "number" },
+        "top_anomaly_accuracy": { "type": "number" }
+      }
+    },
+    "meanStd": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mean", "std"],
+      "properties": {
+        "mean": { "type": "number" },
+        "std": { "type": "number" }
+      }
+    }
+  }
+}

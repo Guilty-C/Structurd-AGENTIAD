@@ -11,10 +11,15 @@ Locked schemas:
 - `reward_input.schema.json`: one canonical reward bundle input with perception and behavior signals
 - `artifact_manifest.schema.json`: one canonical artifact and manifest record for auditability
 - `trace_record.schema.json`: one canonical audit trace for prompt messages, tool exchanges, and final answers
+- `baseline_run_definition.schema.json`: one canonical non-tool baseline run config
+- `baseline_prediction_record.schema.json`: one canonical per-sample baseline prediction artifact
+- `baseline_metrics_report.schema.json`: one canonical metrics bundle containing per-seed, per-class, and aggregate baseline metrics
+- `baseline_run_summary.schema.json`: one canonical baseline evidence summary manifest
 
 Scientific constraints expressed by these schemas:
 
 - the agent mode is always `single_agent`
 - the tool surface is limited to `PZ` and `CR`
+- eval traces may explicitly declare `no_tools` for the baseline path
 - trajectories must declare either `pz_only` or `pz_cr`
 - reward input is decomposed into perception and behavior channels

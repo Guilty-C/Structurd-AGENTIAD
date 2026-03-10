@@ -4,7 +4,8 @@ This module provides one auditable trace format for local evaluation storage and
 one projection back into the Prompt 1.1 training trajectory schema. The point
 is not to overengineer a runtime bus; it is to keep message order, tool usage,
 and final answers explicit enough that later SFT and evaluation code can share
-the same thin-waist records.
+the same thin-waist records. The non-tool baseline path introduced in Prompt
+1.3 uses the same trace record with `tool_path="no_tools"` during eval.
 """
 
 from __future__ import annotations
@@ -80,6 +81,8 @@ class TraceRecord:
             raise ValueError("Only training traces can be exported as training trajectories")
         if self.stage not in {"sft", "grpo"}:
             raise ValueError("Training trajectory export requires stage 'sft' or 'grpo'")
+        if self.tool_path == "no_tools":
+            raise ValueError("No-tool baseline traces are eval-only and cannot become training trajectories")
         if self.final_answer is None:
             raise ValueError("Training trajectory export requires a final_answer payload")
 

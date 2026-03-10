@@ -1,0 +1,37 @@
+{
+  "run_id": "prompt_1_3_non_tool_fixture_baseline",
+  "mode": "no_tools",
+  "prompt_version": "agentiad_baseline_prompt_v1_3",
+  "parser_version": "agentiad_final_answer_parser_v1_3",
+  "execution_boundary": "local",
+  "sample_source": {
+    "kind": "fixture",
+    "path": "tests/fixtures/mmad_fixture",
+    "source_name": "mmad_fixture",
+    "splits": ["train", "val"],
+    "max_samples": 3
+  },
+  "backend": {
+    "type": "mock",
+    "name": "mock_non_tool_baseline_v1",
+    "policy": "fixture_scripted_non_tool_v1",
+    "runtime_owner": "vllm_future_remote"
+  },
+  "seeds": [0, 1],
+  "artifacts": {
+    "root": "dist/outputs/prompt_1_3_non_tool_fixture_baseline",
+    "raw_outputs": "raw_outputs",
+    "traces": "traces",
+    "predictions": "predictions",
+    "metrics": "metrics"
+  },
+  "remote_expectations": [
+    "Swap the mock backend for the maintained runtime adapter on the remote server.",
+    "Keep prompt version, parser version, and artifact contracts unchanged.",
+    "Do not enable PZ or CR until the next milestone."
+  ],
+  "notes": [
+    "This run definition is for local fixture-backed smoke validation only.",
+    "It is not evidence of real model quality or full-MMAD evaluation."
+  ]
+}

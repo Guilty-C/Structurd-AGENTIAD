@@ -35,7 +35,7 @@
     },
     "tool_path": {
       "type": "string",
-      "enum": ["pz_only", "pz_cr"]
+      "enum": ["no_tools", "pz_only", "pz_cr"]
     },
     "storage_purpose": {
       "type": "string",

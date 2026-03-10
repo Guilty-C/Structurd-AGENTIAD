@@ -55,6 +55,25 @@ The local plumbing is intentionally narrow:
 - CR is a deterministic same-category normal exemplar selector, not an ANN retrieval system
 - prompt and answer handling are contract-first and versioned for later framework integration
 
+Prompt 1.3 extends the same waist with a single canonical non-tool baseline path:
+
+- baseline prompts are built from the same sample records with tools disabled by omission
+- backend execution flows through a thin interface in [src/agentiad_recon/backends.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/backends.py)
+- local smoke validation uses a clearly labeled mock backend, not real model inference
+- parsed answers, audit traces, prediction records, metrics, and manifests are written through the same contract layer
+
+## Non-Tool Baseline
+
+The Prompt 1.3 baseline is the first canonical inference/evaluation path:
+
+1. load canonical samples from [src/agentiad_recon/mmad.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/mmad.py)
+2. build a no-tool prompt with [src/agentiad_recon/prompting.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/prompting.py)
+3. submit requests through the thin backend interface in [src/agentiad_recon/backends.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/backends.py)
+4. parse the final answer with the same strict parser used elsewhere
+5. store traces and evaluator artifacts through [src/agentiad_recon/baseline.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/baseline.py) and [src/agentiad_recon/evaluation.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/evaluation.py)
+
+The baseline keeps tools fully disabled. `PZ` and `CR` are not available in this mode and will only be reintroduced in the later tool-augmented inference milestone.
+
 ## Phase Flow
 
 1. Define canonical MMAD-backed samples and audit manifests locally.
@@ -70,10 +89,13 @@ Local machine responsibilities in this prompt:
 - MMAD canonical sample indexing and export
 - deterministic PZ and CR tool adapters
 - prompt, answer, and trace contract implementation
+- non-tool baseline inference and evaluator plumbing
 - lightweight fixture validation and static checks
 
 Remote server responsibilities later:
 - model downloads if large
+- maintained-runtime baseline execution on real models
+- tool-enabled inference runs
 - SFT training
 - GRPO training
 - full MMAD-scale inference and evaluation
@@ -82,7 +104,8 @@ Remote server responsibilities later:
 
 - Real dataset path: pass an explicit MMAD root or set `AGENTIAD_MMAD_ROOT`; the indexer will only report what it can actually discover on disk.
 - Fixture validation path: use the tiny MMAD-style fixture under [tests/fixtures/mmad_fixture](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/tests/fixtures/mmad_fixture) to smoke-test indexing, export, PZ, CR, prompt contracts, answer parsing, and trace serialization locally.
-- Deferred work: baseline inference, tool-enabled inference loops, SFT export at scale, GRPO rollout, and dataset-wide evaluation remain remote/server-phase work.
+- Baseline fixture definition: [configs/baseline_non_tool_fixture.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/baseline_non_tool_fixture.json) freezes the local-only mock-backed baseline run definition.
+- Deferred work: real maintained-runtime baseline execution, tool-enabled inference loops, SFT export at scale, GRPO rollout, and dataset-wide evaluation remain remote/server-phase work.
 
 ## Audit Visibility
 

@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/baseline_run_summary.schema.json",
+  "title": "AgentIADBaselineRunSummary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "tool_mode",
+    "backend_name",
+    "prompt_version",
+    "parser_version",
+    "execution_boundary",
+    "sample_source",
+    "seeds",
+    "sample_count",
+    "parser_validity",
+    "schema_validity",
+    "artifact_paths"
+  ],
+  "properties": {
+    "run_id": { "type": "string", "minLength": 1 },
+    "tool_mode": {
+      "type": "string",
+      "const": "no_tools"
+    },
+    "backend_name": { "type": "string", "minLength": 1 },
+    "prompt_version": { "type": "string", "minLength": 1 },
+    "parser_version": { "type": "string", "minLength": 1 },
+    "execution_boundary": {
+      "type": "string",
+      "enum": ["local", "remote"]
+    },
+    "sample_source": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "seeds": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 1
+    },
+    "sample_count": { "type": "integer", "minimum": 0 },
+    "parser_validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["valid", "invalid"],
+      "properties": {
+        "valid": { "type": "integer", "minimum": 0 },
+        "invalid": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "schema_validity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["valid", "invalid"],
+      "properties": {
+        "valid": { "type": "integer", "minimum": 0 },
+        "invalid": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "artifact_paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "predictions_dir",
+        "traces_dir",
+        "raw_outputs_dir",
+        "metrics_report",
+        "per_seed_metrics",
+        "per_class_metrics",
+        "aggregate_metrics",
+        "run_metadata",
+        "run_manifest"
+      ],
+      "properties": {
+        "predictions_dir": { "type": "string", "minLength": 1 },
+        "traces_dir": { "type": "string", "minLength": 1 },
+        "raw_outputs_dir": { "type": "string", "minLength": 1 },
+        "metrics_report": { "type": "string", "minLength": 1 },
+        "per_seed_metrics": { "type": "string", "minLength": 1 },
+        "per_class_metrics": { "type": "string", "minLength": 1 },
+        "aggregate_metrics": { "type": "string", "minLength": 1 },
+        "run_metadata": { "type": "string", "minLength": 1 },
+        "run_manifest": { "type": "string", "minLength": 1 }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

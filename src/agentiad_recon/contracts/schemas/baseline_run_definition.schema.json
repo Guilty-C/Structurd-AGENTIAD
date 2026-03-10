@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentiad.local/baseline_run_definition.schema.json",
+  "title": "AgentIADBaselineRunDefinition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "mode",
+    "prompt_version",
+    "parser_version",
+    "execution_boundary",
+    "sample_source",
+    "backend",
+    "seeds",
+    "artifacts",
+    "remote_expectations"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mode": {
+      "type": "string",
+      "const": "no_tools"
+    },
+    "prompt_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parser_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "execution_boundary": {
+      "type": "string",
+      "enum": ["local", "remote"]
+    },
+    "sample_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "source_name", "splits", "max_samples"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["fixture", "real"]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "splits": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["train", "val", "test"]
+          },
+          "minItems": 1
+        },
+        "max_samples": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "name", "policy", "runtime_owner"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["mock", "vllm"]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "policy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtime_owner": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "seeds": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "raw_outputs", "traces", "predictions", "metrics"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "raw_outputs": { "type": "string", "minLength": 1 },
+        "traces": { "type": "string", "minLength": 1 },
+        "predictions": { "type": "string", "minLength": 1 },
+        "metrics": { "type": "string", "minLength": 1 }
+      }
+    },
+    "remote_expectations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}
