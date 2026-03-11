@@ -148,6 +148,22 @@ class Prompt15SFTExportTests(unittest.TestCase):
                     message["content"].count(IMAGE_PLACEHOLDER_TOKEN) for message in swift_record["messages"]
                 )
                 self.assertEqual(placeholder_count, len(swift_record["images"]))
+                self.assertTrue(
+                    all(
+                        "artifact_path" not in message["content"] and "coordinate_convention" not in message["content"]
+                        for message in swift_record["messages"]
+                        if message["role"] == "tool"
+                    )
+                )
+                self.assertTrue(
+                    all(
+                        message["content"].startswith("<tool_call>")
+                        and "</tool_call>" in message["content"]
+                        and "<think>" not in message["content"]
+                        for message in swift_record["messages"]
+                        if message.get("role") == "assistant" and message.get("tool_name") is not None
+                    )
+                )
 
                 expected_images: list[str] = []
                 for message in canonical_record["messages"]:
@@ -173,8 +189,11 @@ class Prompt15SFTExportTests(unittest.TestCase):
             )
             self.assertTrue(Path(artifacts.canonical_dataset_path).exists())
             self.assertTrue(Path(artifacts.swift_dataset_path).exists())
+            self.assertTrue(Path(artifacts.swift_length_audit_path).exists())
             self.assertEqual(artifacts.local_validation["record_count"], 2)
             self.assertIsInstance(artifacts.swift_runtime_check["available"], bool)
+            self.assertIn("p95", artifacts.swift_length_audit_summary)
+            self.assertIn("top_offenders", artifacts.swift_length_audit_summary)
 
 
 if __name__ == "__main__":

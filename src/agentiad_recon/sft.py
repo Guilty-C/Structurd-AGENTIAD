@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -61,6 +63,8 @@ class SFTArtifacts:
     swift_manifest_path: str
     swift_recipe_path: str
     swift_runtime_check: dict[str, Any]
+    swift_length_audit_path: str
+    swift_length_audit_summary: dict[str, Any]
     local_validation: dict[str, Any]
 
 
@@ -563,6 +567,113 @@ def local_dataset_sanity(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+_THINK_BLOCK_PATTERN = re.compile(r"(?s)(?P<prefix>.*?)<think>\s*(?P<think>.*?)\s*</think>(?P<suffix>.*)")
+_TOOL_CALL_BLOCK_PATTERN = re.compile(r"(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>")
+
+
+def _normalized_text(text: str) -> str:
+    """Collapse whitespace so duplicate-think detection is robust to formatting."""
+
+    return " ".join(text.split())
+
+
+def _dedupe_prefix_against_think(content: str) -> str:
+    """Drop assistant prose duplicated both outside and inside one `<think>` block."""
+
+    match = _THINK_BLOCK_PATTERN.fullmatch(content)
+    if match is None:
+        return content
+
+    prefix = match.group("prefix")
+    think = match.group("think")
+    suffix = match.group("suffix")
+    if prefix.strip() and _normalized_text(prefix) == _normalized_text(think):
+        compact = f"<think>\n{think.strip()}\n</think>"
+        if suffix.strip():
+            compact = f"{compact}\n{suffix.strip()}"
+        return compact
+    return content
+
+
+def _compact_tool_call_block(content: str) -> str:
+    """Keep only a compact `<tool_call>` JSON block for tool-request supervision."""
+
+    compact_source = _dedupe_prefix_against_think(content)
+    match = _TOOL_CALL_BLOCK_PATTERN.search(compact_source)
+    if match is None:
+        return compact_source
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return compact_source
+    return f"<tool_call>{json.dumps(payload, separators=(',', ':'), sort_keys=True)}</tool_call>"
+
+
+def _placeholder_value(image_count: int) -> str | list[str]:
+    """Return one placeholder string or a repeated placeholder list."""
+
+    if image_count <= 0:
+        return ""
+    if image_count == 1:
+        return IMAGE_PLACEHOLDER_TOKEN
+    return [IMAGE_PLACEHOLDER_TOKEN for _ in range(image_count)]
+
+
+def _compact_tool_result_payload(
+    *,
+    tool_name: str | None,
+    content: str,
+    image_refs: list[str],
+) -> str:
+    """Project verbose tool payloads into compact training-oriented JSON text."""
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    compact: dict[str, Any] = {"tool": tool_name or "UNKNOWN"}
+    placeholder = _placeholder_value(len(image_refs))
+
+    if tool_name == "PZ":
+        if placeholder:
+            compact["image"] = placeholder
+        bbox = payload.get("normalized_bbox")
+        if isinstance(bbox, dict):
+            compact_bbox = {}
+            for key in ("x0", "y0", "x1", "y1"):
+                value = bbox.get(key)
+                if isinstance(value, (int, float)):
+                    compact_bbox[key] = value
+            if compact_bbox:
+                compact["bbox"] = compact_bbox
+        compact["result"] = "crop_ready"
+        return json.dumps(compact, separators=(",", ":"), sort_keys=True)
+
+    if tool_name == "CR":
+        exemplar = payload.get("selected_exemplar")
+        if isinstance(exemplar, dict):
+            compact_exemplar: dict[str, Any] = {}
+            for key in ("sample_id", "category", "split"):
+                value = exemplar.get(key)
+                if isinstance(value, str) and value:
+                    compact_exemplar[key] = value
+            if placeholder:
+                compact_exemplar["image"] = placeholder
+            compact["selected_exemplar"] = compact_exemplar
+        else:
+            compact["selected_exemplar"] = None
+        compact["result"] = "reference_ready"
+        return json.dumps(compact, separators=(",", ":"), sort_keys=True)
+
+    if placeholder:
+        compact["image"] = placeholder
+    compact["result"] = "tool_output"
+    return json.dumps(compact, separators=(",", ":"), sort_keys=True)
+
+
 def _render_swift_message_content(
     message: dict[str, Any],
     *,
@@ -580,25 +691,72 @@ def _render_swift_message_content(
         else list(image_refs_for_placeholders)
     )
     if not image_refs:
-        return content
+        if message["message_type"] == "tool_request":
+            return _compact_tool_call_block(content)
+        return _dedupe_prefix_against_think(content)
 
     if message["message_type"] == "tool_result":
-        # Keep tool results machine-readable while making image insertion
-        # explicit and auditable for the downstream template layer.
-        try:
-            payload = json.loads(content)
-        except json.JSONDecodeError:
-            payload = None
-        if isinstance(payload, dict):
-            payload = dict(payload)
-            payload["image_placeholders"] = [
-                {"index": index, "image_ref": image_ref, "token": IMAGE_PLACEHOLDER_TOKEN}
-                for index, image_ref in enumerate(image_refs)
-            ]
-            return json.dumps(payload, sort_keys=True)
+        return _compact_tool_result_payload(
+            tool_name=message.get("tool_name"),
+            content=content,
+            image_refs=image_refs,
+        )
 
     placeholder_prefix = IMAGE_PLACEHOLDER_TOKEN * len(image_refs)
-    return f"{placeholder_prefix}\n{content}" if content else placeholder_prefix
+    compact_content = _dedupe_prefix_against_think(content)
+    return f"{placeholder_prefix}\n{compact_content}" if compact_content else placeholder_prefix
+
+
+def _nearest_rank(sorted_values: list[int], percentile: int) -> int:
+    """Compute nearest-rank percentile from a pre-sorted non-empty integer list."""
+
+    rank = max(1, math.ceil((percentile / 100.0) * len(sorted_values)))
+    return sorted_values[rank - 1]
+
+
+def _build_length_audit(swift_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build lightweight length statistics for compact MS-Swift-facing records."""
+
+    if not swift_records:
+        raise SFTExportError("Cannot build length audit for an empty MS-Swift dataset.")
+
+    rows: list[dict[str, Any]] = []
+    for record in swift_records:
+        char_length = sum(len(message["content"]) for message in record["messages"])
+        token_estimate = sum(len(message["content"].split()) for message in record["messages"])
+        rows.append(
+            {
+                "id": record["id"],
+                "sample_id": record["metadata"]["sample_id"],
+                "trajectory_mode": record["metadata"]["trajectory_mode"],
+                "char_length": char_length,
+                "token_estimate": token_estimate,
+            }
+        )
+
+    token_lengths = sorted(row["token_estimate"] for row in rows)
+    top_rows = sorted(rows, key=lambda row: row["token_estimate"], reverse=True)[:5]
+    return {
+        "length_unit": "whitespace_token_estimate_from_message_content",
+        "record_count": len(rows),
+        "p50": _nearest_rank(token_lengths, 50),
+        "p90": _nearest_rank(token_lengths, 90),
+        "p95": _nearest_rank(token_lengths, 95),
+        "p99": _nearest_rank(token_lengths, 99),
+        "max": token_lengths[-1],
+        "count_above_4096": sum(1 for value in token_lengths if value > 4096),
+        "count_above_8192": sum(1 for value in token_lengths if value > 8192),
+        "top_offenders": [
+            {
+                "id": row["id"],
+                "sample_id": row["sample_id"],
+                "trajectory_mode": row["trajectory_mode"],
+                "token_estimate": row["token_estimate"],
+                "char_length": row["char_length"],
+            }
+            for row in top_rows
+        ],
+    }
 
 
 def build_swift_records(records: list[dict[str, Any]], recipe: dict[str, Any]) -> list[dict[str, Any]]:
@@ -676,7 +834,7 @@ def export_swift_dataset(
     canonical_records: list[dict[str, Any]],
     recipe_path: str | Path,
     output_root: str | Path,
-) -> tuple[Path, Path, dict[str, Any], dict[str, Any]]:
+) -> tuple[Path, Path, Path, dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Write the thin MS-Swift dataset projection and a recipe manifest."""
 
     recipe = load_swift_recipe(recipe_path)
@@ -689,22 +847,37 @@ def export_swift_dataset(
         "\n".join(json.dumps(record, sort_keys=True) for record in swift_records) + "\n",
         encoding="utf-8",
     )
+    length_audit = _build_length_audit(swift_records)
+    length_audit_path = output_directory / f"{Path(recipe['dataset']['output_jsonl']).stem}.length_audit.json"
+    length_audit_path.write_text(json.dumps(length_audit, indent=2, sort_keys=True), encoding="utf-8")
+
     runtime_probe = swift_runtime_probe()
     manifest = {
         "recipe_name": recipe["recipe_name"],
         "record_count": len(swift_records),
         "swift_dataset_path": str(swift_dataset_path.resolve()),
         "swift_dataset_sha256": sha256_file(swift_dataset_path),
+        "length_audit_path": str(length_audit_path.resolve()),
+        "length_audit_summary": {
+            "record_count": length_audit["record_count"],
+            "p50": length_audit["p50"],
+            "p90": length_audit["p90"],
+            "p95": length_audit["p95"],
+            "p99": length_audit["p99"],
+            "max": length_audit["max"],
+            "count_above_4096": length_audit["count_above_4096"],
+            "count_above_8192": length_audit["count_above_8192"],
+        },
         "runtime_probe": runtime_probe,
         "notes": [
             "This dataset is adapter-generated for later MS-Swift ownership.",
-            "Local Prompt 1.5 validation only checks format and config integrity.",
+            "Local Prompt 1.5 validation checks compact export format and length audit.",
         ],
     }
     validate_payload(manifest, "sft_dataset_manifest.schema.json")
     manifest_path = output_directory / recipe["dataset"]["manifest_json"]
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-    return swift_dataset_path, manifest_path, recipe, runtime_probe
+    return swift_dataset_path, manifest_path, length_audit_path, recipe, runtime_probe, length_audit
 
 
 def run_prompt_1_5_export(
@@ -730,7 +903,7 @@ def run_prompt_1_5_export(
         {"records": [sha256_bytes(canonical_json_bytes(record)) for record in records]}
     )
 
-    swift_dataset_path, swift_manifest_path, _recipe, runtime_probe = export_swift_dataset(
+    swift_dataset_path, swift_manifest_path, swift_length_audit_path, _recipe, runtime_probe, length_audit = export_swift_dataset(
         canonical_records=records,
         recipe_path=swift_recipe_path,
         output_root=resolved_output_root,
@@ -742,6 +915,8 @@ def run_prompt_1_5_export(
         swift_manifest_path=str(swift_manifest_path.resolve()),
         swift_recipe_path=str(_resolve_path(swift_recipe_path)),
         swift_runtime_check=runtime_probe,
+        swift_length_audit_path=str(swift_length_audit_path.resolve()),
+        swift_length_audit_summary=length_audit,
         local_validation=local_validation,
     )
 
@@ -780,6 +955,8 @@ def main() -> int:
                 "swift_manifest_path": artifacts.swift_manifest_path,
                 "swift_recipe_path": artifacts.swift_recipe_path,
                 "swift_runtime_check": artifacts.swift_runtime_check,
+                "swift_length_audit_path": artifacts.swift_length_audit_path,
+                "swift_length_audit_summary": artifacts.swift_length_audit_summary,
                 "local_validation": artifacts.local_validation,
             },
             indent=2,

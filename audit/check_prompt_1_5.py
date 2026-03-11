@@ -175,6 +175,35 @@ def main() -> int:
             "local validation checks exemplar linkage",
             failures,
         )
+        require(Path(artifacts.swift_length_audit_path).exists(), "compact export length-audit sidecar exists", failures)
+        length_audit = json.loads(Path(artifacts.swift_length_audit_path).read_text(encoding="utf-8"))
+        require(
+            all(key in length_audit for key in ["record_count", "p50", "p90", "p95", "p99", "max", "top_offenders"]),
+            "length audit includes percentile and offender fields",
+            failures,
+        )
+        require(
+            all(
+                "artifact_path" not in message["content"] and "coordinate_convention" not in message["content"]
+                for record in swift_records
+                for message in record["messages"]
+                if message["role"] == "tool"
+            ),
+            "compact tool responses omit verbose artifact metadata",
+            failures,
+        )
+        require(
+            all(
+                message["content"].startswith("<tool_call>")
+                and "</tool_call>" in message["content"]
+                and "<think>" not in message["content"]
+                for record in swift_records
+                for message in record["messages"]
+                if message.get("role") == "assistant" and message.get("tool_name") is not None
+            ),
+            "assistant tool-request content is compact tool_call text",
+            failures,
+        )
         require(
             isinstance(artifacts.swift_runtime_check["available"], bool),
             "local run reports MS-Swift runtime availability as a boolean probe",

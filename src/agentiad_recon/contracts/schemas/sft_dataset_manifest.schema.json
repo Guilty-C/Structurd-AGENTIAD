@@ -23,6 +23,31 @@
     "recipe_name": { "type": "string" },
     "swift_dataset_path": { "type": "string" },
     "swift_dataset_sha256": { "type": "string" },
+    "length_audit_path": { "type": "string" },
+    "length_audit_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_count",
+        "p50",
+        "p90",
+        "p95",
+        "p99",
+        "max",
+        "count_above_4096",
+        "count_above_8192"
+      ],
+      "properties": {
+        "record_count": { "type": "integer", "minimum": 1 },
+        "p50": { "type": "integer", "minimum": 0 },
+        "p90": { "type": "integer", "minimum": 0 },
+        "p95": { "type": "integer", "minimum": 0 },
+        "p99": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 0 },
+        "count_above_4096": { "type": "integer", "minimum": 0 },
+        "count_above_8192": { "type": "integer", "minimum": 0 }
+      }
+    },
     "runtime_probe": { "type": "object" },
     "notes": {
       "type": "array",
