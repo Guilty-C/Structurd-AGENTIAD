@@ -52,6 +52,7 @@
     "length_audit_proxy_summary": { "type": "object" },
     "length_audit_true_path": { "type": "string" },
     "length_audit_true_summary": { "type": "object" },
+    "resolved_remote_surfaces_path": { "type": "string" },
     "filtered_exports": {
       "type": "array",
       "items": {
@@ -62,14 +63,18 @@
           "dataset_path",
           "manifest_path",
           "kept_count",
-          "dropped_count"
+          "dropped_count",
+          "threshold_clean_basis",
+          "true_threshold_clean_certified"
         ],
         "properties": {
           "threshold": { "type": "integer", "enum": [4096, 8192] },
           "dataset_path": { "type": "string" },
           "manifest_path": { "type": "string" },
           "kept_count": { "type": "integer", "minimum": 0 },
-          "dropped_count": { "type": "integer", "minimum": 0 }
+          "dropped_count": { "type": "integer", "minimum": 0 },
+          "threshold_clean_basis": { "type": "string", "minLength": 1 },
+          "true_threshold_clean_certified": { "type": "boolean" }
         }
       }
     },

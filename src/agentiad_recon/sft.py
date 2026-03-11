@@ -69,6 +69,8 @@ class SFTArtifacts:
     swift_proxy_length_audit_path: str
     swift_proxy_length_audit_summary: dict[str, Any]
     swift_filtered_manifests: dict[str, str]
+    resolved_remote_surfaces_path: str
+    resolved_remote_surfaces_summary: dict[str, Any]
     local_validation: dict[str, Any]
 
 
@@ -863,6 +865,14 @@ def export_swift_dataset(
     true_length_audit = compute_true_length_audit(swift_records, recipe, strict=strict_true_length_audit)
     true_length_audit_path = output_directory / f"{stem}.length_audit.true.json"
     true_length_audit_path.write_text(json.dumps(true_length_audit, indent=2, sort_keys=True), encoding="utf-8")
+    true_multimodal_encode = bool(true_length_audit["true_multimodal_encode"])
+    length_audit_backend = str(true_length_audit["backend"])
+    threshold_clean_basis = (
+        "true_multimodal_encode"
+        if true_multimodal_encode
+        else "fallback_derived_not_true_certified"
+    )
+    strict_passed = strict_true_length_audit and true_multimodal_encode
 
     true_lengths = {row["id"]: int(row["encoded_length"]) for row in true_length_audit["lengths"]}
     filtered_exports: list[dict[str, Any]] = []
@@ -885,6 +895,12 @@ def export_swift_dataset(
             "kept_count": len(kept_records),
             "dropped_count": len(dropped_rows),
             "true_length_audit_path": str(true_length_audit_path.resolve()),
+            "true_multimodal_encode": true_multimodal_encode,
+            "length_audit_backend": length_audit_backend,
+            "threshold_clean_basis": threshold_clean_basis,
+            "strict_true_length_audit_requested": strict_true_length_audit,
+            "strict_true_length_audit_passed": strict_passed,
+            "true_threshold_clean_certified": true_multimodal_encode,
             "dropped_top_offenders": sorted(
                 dropped_rows,
                 key=lambda row: row["encoded_length"],
@@ -900,6 +916,8 @@ def export_swift_dataset(
                 "manifest_path": str(filtered_manifest_path.resolve()),
                 "kept_count": len(kept_records),
                 "dropped_count": len(dropped_rows),
+                "threshold_clean_basis": threshold_clean_basis,
+                "true_threshold_clean_certified": true_multimodal_encode,
             }
         )
         filtered_manifest_paths[str(threshold)] = str(filtered_manifest_path.resolve())
@@ -931,7 +949,11 @@ def export_swift_dataset(
             "max": true_length_audit["max"],
             "count_above_4096": true_length_audit["count_above_4096"],
             "count_above_8192": true_length_audit["count_above_8192"],
-            "true_multimodal_encode": true_length_audit["true_multimodal_encode"],
+            "true_multimodal_encode": true_multimodal_encode,
+            "length_audit_backend": length_audit_backend,
+            "threshold_clean_basis": threshold_clean_basis,
+            "strict_true_length_audit_requested": strict_true_length_audit,
+            "strict_true_length_audit_passed": strict_passed,
         },
         "filtered_exports": filtered_exports,
         "runtime_probe": runtime_probe,
@@ -951,9 +973,56 @@ def export_swift_dataset(
         "true_length_audit_path": true_length_audit_path,
         "true_length_audit": true_length_audit,
         "filtered_manifest_paths": filtered_manifest_paths,
+        "true_multimodal_encode": true_multimodal_encode,
+        "length_audit_backend": length_audit_backend,
+        "threshold_clean_basis": threshold_clean_basis,
+        "strict_true_length_audit_requested": strict_true_length_audit,
+        "strict_true_length_audit_passed": strict_passed,
         "recipe": recipe,
         "runtime_probe": runtime_probe,
     }
+
+
+def _write_resolved_remote_surfaces(
+    *,
+    output_root: Path,
+    export_config_path: str | Path,
+    swift_recipe_path: str | Path,
+    dataset_root: Path,
+    strict_true_length_audit: bool,
+    swift_export: dict[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    """Write one resolved-surface artifact so remote commands avoid template ambiguity."""
+
+    resolved = {
+        "export_config_path": str(_resolve_path(export_config_path)),
+        "swift_recipe_path": str(_resolve_path(swift_recipe_path)),
+        "dataset_root": str(dataset_root.resolve()),
+        "output_root": str(output_root.resolve()),
+        "model_id_or_path": swift_export["recipe"]["training"]["model_id_or_path"],
+        "swift_dataset_path": str(swift_export["swift_dataset_path"].resolve()),
+        "swift_manifest_path": str(swift_export["swift_manifest_path"].resolve()),
+        "length_audit_true_path": str(swift_export["true_length_audit_path"].resolve()),
+        "length_audit_proxy_path": str(swift_export["proxy_length_audit_path"].resolve()),
+        "length_audit_backend": swift_export["length_audit_backend"],
+        "true_multimodal_encode": swift_export["true_multimodal_encode"],
+        "threshold_clean_basis": swift_export["threshold_clean_basis"],
+        "strict_true_length_audit_requested": strict_true_length_audit,
+        "strict_true_length_audit_passed": swift_export["strict_true_length_audit_passed"],
+        "filtered_manifests": swift_export["filtered_manifest_paths"],
+    }
+    path = output_root / "prompt_1_8_resolved_remote_surfaces.json"
+    path.write_text(json.dumps(resolved, indent=2, sort_keys=True), encoding="utf-8")
+    summary = {
+        "dataset_root": resolved["dataset_root"],
+        "output_root": resolved["output_root"],
+        "length_audit_backend": resolved["length_audit_backend"],
+        "true_multimodal_encode": resolved["true_multimodal_encode"],
+        "threshold_clean_basis": resolved["threshold_clean_basis"],
+        "strict_true_length_audit_requested": resolved["strict_true_length_audit_requested"],
+        "strict_true_length_audit_passed": resolved["strict_true_length_audit_passed"],
+    }
+    return path, summary
 
 
 def run_prompt_1_5_export(
@@ -974,6 +1043,7 @@ def run_prompt_1_5_export(
         max_samples_per_mode=max_samples_per_mode,
     )
     definition = export_metadata["definition"]
+    resolved_dataset_root = _resolve_path(dataset_root or definition["sample_source"]["path"])
     resolved_output_root = _resolve_path(output_root or definition["output"]["root"])
     local_validation = local_dataset_sanity(records)
     local_validation["canonical_record_digest"] = sha256_mapping(
@@ -985,6 +1055,21 @@ def run_prompt_1_5_export(
         recipe_path=swift_recipe_path,
         output_root=resolved_output_root,
         strict_true_length_audit=strict_true_length_audit,
+    )
+    resolved_surfaces_path, resolved_surfaces_summary = _write_resolved_remote_surfaces(
+        output_root=resolved_output_root,
+        export_config_path=export_config_path,
+        swift_recipe_path=swift_recipe_path,
+        dataset_root=resolved_dataset_root,
+        strict_true_length_audit=strict_true_length_audit,
+        swift_export=swift_export,
+    )
+    swift_manifest_payload = json.loads(swift_export["swift_manifest_path"].read_text(encoding="utf-8"))
+    swift_manifest_payload["resolved_remote_surfaces_path"] = str(resolved_surfaces_path.resolve())
+    validate_payload(swift_manifest_payload, "sft_dataset_manifest.schema.json")
+    swift_export["swift_manifest_path"].write_text(
+        json.dumps(swift_manifest_payload, indent=2, sort_keys=True),
+        encoding="utf-8",
     )
     return SFTArtifacts(
         canonical_dataset_path=str((resolved_output_root / definition["output"]["canonical_dataset"]).resolve()),
@@ -998,6 +1083,8 @@ def run_prompt_1_5_export(
         swift_proxy_length_audit_path=str(swift_export["proxy_length_audit_path"].resolve()),
         swift_proxy_length_audit_summary=swift_export["proxy_length_audit"],
         swift_filtered_manifests=swift_export["filtered_manifest_paths"],
+        resolved_remote_surfaces_path=str(resolved_surfaces_path.resolve()),
+        resolved_remote_surfaces_summary=resolved_surfaces_summary,
         local_validation=local_validation,
     )
 
@@ -1047,6 +1134,8 @@ def main() -> int:
                 "swift_proxy_length_audit_path": artifacts.swift_proxy_length_audit_path,
                 "swift_proxy_length_audit_summary": artifacts.swift_proxy_length_audit_summary,
                 "swift_filtered_manifests": artifacts.swift_filtered_manifests,
+                "resolved_remote_surfaces_path": artifacts.resolved_remote_surfaces_path,
+                "resolved_remote_surfaces_summary": artifacts.resolved_remote_surfaces_summary,
                 "local_validation": artifacts.local_validation,
             },
             indent=2,

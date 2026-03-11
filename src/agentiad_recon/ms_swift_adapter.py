@@ -215,10 +215,13 @@ def compute_true_length_audit(
 
     sorted_lengths = sorted(row["encoded_length"] for row in rows)
     top_rows = sorted(rows, key=lambda row: row["encoded_length"], reverse=True)[:10]
+    audit_mode = "true_multimodal_encode" if true_multimodal else "fallback_derived_not_true_certified"
     return {
         "audit_type": "multimodal_length_audit",
+        "audit_mode": audit_mode,
         "true_multimodal_encode": true_multimodal,
         "backend": backend,
+        "length_audit_backend": backend,
         "backend_detail": backend_detail,
         "record_count": len(rows),
         "p50": _nearest_rank(sorted_lengths, 50),

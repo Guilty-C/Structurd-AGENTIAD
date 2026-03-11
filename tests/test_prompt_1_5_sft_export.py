@@ -191,14 +191,19 @@ class Prompt15SFTExportTests(unittest.TestCase):
             self.assertTrue(Path(artifacts.swift_dataset_path).exists())
             self.assertTrue(Path(artifacts.swift_length_audit_path).exists())
             self.assertTrue(Path(artifacts.swift_proxy_length_audit_path).exists())
+            self.assertTrue(Path(artifacts.resolved_remote_surfaces_path).exists())
             self.assertEqual(artifacts.local_validation["record_count"], 2)
             self.assertIsInstance(artifacts.swift_runtime_check["available"], bool)
             self.assertIn("p95", artifacts.swift_length_audit_summary)
             self.assertIn("top_offenders", artifacts.swift_length_audit_summary)
+            self.assertIn("audit_mode", artifacts.swift_length_audit_summary)
+            self.assertIn("length_audit_backend", artifacts.swift_length_audit_summary)
             self.assertIn("4096", artifacts.swift_filtered_manifests)
             self.assertIn("8192", artifacts.swift_filtered_manifests)
             self.assertTrue(Path(artifacts.swift_filtered_manifests["4096"]).exists())
             self.assertTrue(Path(artifacts.swift_filtered_manifests["8192"]).exists())
+            self.assertIn("strict_true_length_audit_passed", artifacts.resolved_remote_surfaces_summary)
+            self.assertIn("threshold_clean_basis", artifacts.resolved_remote_surfaces_summary)
 
             true_audit_rows = {
                 row["id"]: row["encoded_length"]
@@ -210,6 +215,8 @@ class Prompt15SFTExportTests(unittest.TestCase):
                     Path(artifacts.swift_filtered_manifests[threshold_key]).read_text(encoding="utf-8")
                 )
                 self.assertEqual(filtered_manifest["threshold"], threshold)
+                self.assertIn("threshold_clean_basis", filtered_manifest)
+                self.assertIn("true_threshold_clean_certified", filtered_manifest)
                 filtered_dataset_path = Path(filtered_manifest["kept_dataset_path"])
                 self.assertTrue(filtered_dataset_path.exists())
                 filtered_records = [
@@ -220,6 +227,32 @@ class Prompt15SFTExportTests(unittest.TestCase):
                 self.assertTrue(
                     all(true_audit_rows[record["id"]] <= threshold for record in filtered_records)
                 )
+                if artifacts.swift_length_audit_summary["true_multimodal_encode"]:
+                    self.assertTrue(filtered_manifest["true_threshold_clean_certified"])
+                    self.assertEqual(filtered_manifest["threshold_clean_basis"], "true_multimodal_encode")
+                else:
+                    self.assertFalse(filtered_manifest["true_threshold_clean_certified"])
+                    self.assertEqual(filtered_manifest["threshold_clean_basis"], "fallback_derived_not_true_certified")
+
+    def test_strict_true_length_audit_requires_real_encoder(self) -> None:
+        """Strict mode must fail when true multimodal encode is unavailable."""
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            try:
+                artifacts = run_prompt_1_5_export(
+                    export_config_path=EXPORT_CONFIG,
+                    swift_recipe_path=SWIFT_RECIPE,
+                    dataset_root=FIXTURE_ROOT,
+                    output_root=tempdir,
+                    max_samples_per_mode=1,
+                    strict_true_length_audit=True,
+                )
+            except RuntimeError as exc:
+                self.assertIn("strict mode", str(exc))
+                return
+
+            self.assertTrue(artifacts.swift_length_audit_summary["true_multimodal_encode"])
+            self.assertTrue(artifacts.resolved_remote_surfaces_summary["strict_true_length_audit_passed"])
 
 
 if __name__ == "__main__":

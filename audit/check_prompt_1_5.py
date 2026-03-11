@@ -225,6 +225,21 @@ def main() -> int:
             "local run reports MS-Swift runtime availability as a boolean probe",
             failures,
         )
+        require(Path(artifacts.resolved_remote_surfaces_path).exists(), "resolved remote surfaces artifact exists", failures)
+        require(
+            all(
+                key in artifacts.resolved_remote_surfaces_summary
+                for key in [
+                    "length_audit_backend",
+                    "true_multimodal_encode",
+                    "threshold_clean_basis",
+                    "strict_true_length_audit_requested",
+                    "strict_true_length_audit_passed",
+                ]
+            ),
+            "resolved remote surfaces summary contains truthful audit fields",
+            failures,
+        )
         require(
             all(key in artifacts.swift_filtered_manifests for key in ["4096", "8192"]),
             "filtered manifest mapping includes 4096 and 8192",
@@ -237,6 +252,21 @@ def main() -> int:
             require(manifest_path.exists(), f"filtered manifest exists for <= {threshold}", failures)
             filtered_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             require(filtered_manifest["threshold"] == threshold, f"filtered manifest threshold matches {threshold}", failures)
+            require(
+                all(
+                    key in filtered_manifest
+                    for key in [
+                        "threshold_clean_basis",
+                        "true_threshold_clean_certified",
+                        "true_multimodal_encode",
+                        "length_audit_backend",
+                        "strict_true_length_audit_requested",
+                        "strict_true_length_audit_passed",
+                    ]
+                ),
+                f"filtered manifest includes truthful fields for <= {threshold}",
+                failures,
+            )
             filtered_dataset_path = Path(filtered_manifest["kept_dataset_path"])
             require(filtered_dataset_path.exists(), f"filtered dataset exists for <= {threshold}", failures)
             filtered_records = [
@@ -255,6 +285,20 @@ def main() -> int:
                 failures,
             )
             require(filtered_manifest["kept_count"] > 0, f"filtered dataset is non-empty for <= {threshold}", failures)
+            if length_audit.get("true_multimodal_encode"):
+                require(
+                    filtered_manifest["true_threshold_clean_certified"] is True
+                    and filtered_manifest["threshold_clean_basis"] == "true_multimodal_encode",
+                    f"true audit certification is honest for <= {threshold}",
+                    failures,
+                )
+            else:
+                require(
+                    filtered_manifest["true_threshold_clean_certified"] is False
+                    and filtered_manifest["threshold_clean_basis"] == "fallback_derived_not_true_certified",
+                    f"fallback audit cannot masquerade as true for <= {threshold}",
+                    failures,
+                )
             print(
                 f"INFO: filtered_le{threshold}_summary",
                 json.dumps(
@@ -262,10 +306,39 @@ def main() -> int:
                         "kept_count": filtered_manifest["kept_count"],
                         "dropped_count": filtered_manifest["dropped_count"],
                         "threshold": filtered_manifest["threshold"],
+                        "threshold_clean_basis": filtered_manifest["threshold_clean_basis"],
+                        "true_threshold_clean_certified": filtered_manifest["true_threshold_clean_certified"],
                     },
                     sort_keys=True,
                 ),
             )
+
+    with tempfile.TemporaryDirectory() as strict_tempdir:
+        strict_failed = False
+        strict_success_true_encode = False
+        try:
+            strict_artifacts = run_prompt_1_5_export(
+                export_config_path=EXPORT_CONFIG,
+                swift_recipe_path=SWIFT_RECIPE,
+                dataset_root=FIXTURE_ROOT,
+                output_root=strict_tempdir,
+                max_samples_per_mode=1,
+                strict_true_length_audit=True,
+            )
+            require(
+                strict_artifacts.swift_length_audit_summary["true_multimodal_encode"] is True
+                and strict_artifacts.resolved_remote_surfaces_summary["strict_true_length_audit_passed"] is True,
+                "strict mode only succeeds with real true-audit encode",
+                failures,
+            )
+            strict_success_true_encode = bool(strict_artifacts.swift_length_audit_summary["true_multimodal_encode"])
+        except RuntimeError:
+            strict_failed = True
+        require(
+            strict_failed or strict_success_true_encode,
+            "strict mode fails when true encoder is unavailable",
+            failures,
+        )
 
     runtime_probe = swift_runtime_probe()
     require(isinstance(runtime_probe["available"], bool), "runtime probe returns boolean availability", failures)
