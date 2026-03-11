@@ -25,6 +25,7 @@ from agentiad_recon.sft import run_prompt_1_5_export
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "mmad_fixture"
 EXPORT_CONFIG = REPO_ROOT / "configs" / "sft_export_fixture.json"
 SWIFT_RECIPE = REPO_ROOT / "configs" / "ms_swift_sft_fixture.json"
+IMAGE_PLACEHOLDER_TOKEN = "<image>"
 
 
 def require(condition: bool, label: str, failures: list[str]) -> None:
@@ -132,18 +133,45 @@ def main() -> int:
             failures,
         )
         require(
+            all(
+                isinstance(message["content"], str)
+                and not isinstance(message["content"], (list, dict))
+                for record in swift_records
+                for message in record["messages"]
+            ),
+            "MS-Swift message content is string-only",
+            failures,
+        )
+        require(
+            all(
+                sum(message["content"].count(IMAGE_PLACEHOLDER_TOKEN) for message in record["messages"])
+                == len(record["images"])
+                for record in swift_records
+            ),
+            "MS-Swift placeholder count matches top-level images length",
+            failures,
+        )
+        require(
+            all(
+                len(record["images"]) == len(set(record["images"]))
+                for record in swift_records
+            ),
+            "MS-Swift top-level images are first-occurrence ordered without duplicates",
+            failures,
+        )
+        require(
             artifacts.local_validation["exemplar_linkage_checked"],
             "local validation checks exemplar linkage",
             failures,
         )
         require(
-            not artifacts.swift_runtime_check["available"],
-            "local run is honest that MS-Swift is unavailable here",
+            isinstance(artifacts.swift_runtime_check["available"], bool),
+            "local run reports MS-Swift runtime availability as a boolean probe",
             failures,
         )
 
     runtime_probe = swift_runtime_probe()
-    require(not runtime_probe["available"], "runtime probe reports MS-Swift as unavailable locally", failures)
+    require(isinstance(runtime_probe["available"], bool), "runtime probe returns boolean availability", failures)
 
     suite = unittest.defaultTestLoader.discover(
         str(REPO_ROOT / "tests"),

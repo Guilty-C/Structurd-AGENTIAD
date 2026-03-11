@@ -44,6 +44,7 @@ SCRIPTED_SFT_POLICIES = {
     "pz_cr": "fixture_scripted_pz_cr_v1",
 }
 TOOL_ORDER = {"PZ": 0, "CR": 1}
+IMAGE_PLACEHOLDER_TOKEN = "<image>"
 
 
 class SFTExportError(RuntimeError):
@@ -562,13 +563,42 @@ def local_dataset_sanity(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _content_blocks(message: dict[str, Any]) -> list[dict[str, str]]:
-    """Convert one canonical message into a simple multimodal content block list."""
+def _render_swift_message_content(
+    message: dict[str, Any],
+    *,
+    image_refs_for_placeholders: list[str] | None = None,
+) -> str:
+    """Render one canonical message into the MS-Swift string-content shape."""
 
-    blocks = [{"type": "text", "text": message["content"]}]
-    for image_ref in message["image_refs"]:
-        blocks.append({"type": "image", "image": image_ref})
-    return blocks
+    content = message["content"]
+    if not isinstance(content, str):
+        raise SFTExportError(f"MS-Swift projection requires string message content, got {type(content)!r}")
+
+    image_refs = (
+        list(message["image_refs"])
+        if image_refs_for_placeholders is None
+        else list(image_refs_for_placeholders)
+    )
+    if not image_refs:
+        return content
+
+    if message["message_type"] == "tool_result":
+        # Keep tool results machine-readable while making image insertion
+        # explicit and auditable for the downstream template layer.
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload["image_placeholders"] = [
+                {"index": index, "image_ref": image_ref, "token": IMAGE_PLACEHOLDER_TOKEN}
+                for index, image_ref in enumerate(image_refs)
+            ]
+            return json.dumps(payload, sort_keys=True)
+
+    placeholder_prefix = IMAGE_PLACEHOLDER_TOKEN * len(image_refs)
+    return f"{placeholder_prefix}\n{content}" if content else placeholder_prefix
 
 
 def build_swift_records(records: list[dict[str, Any]], recipe: dict[str, Any]) -> list[dict[str, Any]]:
@@ -577,26 +607,52 @@ def build_swift_records(records: list[dict[str, Any]], recipe: dict[str, Any]) -
     swift_records: list[dict[str, Any]] = []
     for record in records:
         dataset_messages: list[dict[str, Any]] = []
+        images: list[str] = []
+        seen_images: set[str] = set()
+        placeholder_ref_traversal: list[str] = []
         for message in record["messages"]:
             swift_role = message["role"]
             if message["message_type"] == "tool_result":
                 swift_role = "tool"
+
+            new_image_refs: list[str] = []
+            for image_ref in message["image_refs"]:
+                if image_ref not in seen_images:
+                    seen_images.add(image_ref)
+                    images.append(image_ref)
+                    new_image_refs.append(image_ref)
+                    placeholder_ref_traversal.append(image_ref)
+
             dataset_message = {
                 "role": swift_role,
-                "content": _content_blocks(message),
+                "content": _render_swift_message_content(
+                    message,
+                    image_refs_for_placeholders=new_image_refs,
+                ),
                 "loss": message["loss_mask"] if swift_role == "assistant" else False,
             }
+            if not isinstance(dataset_message["content"], str):
+                raise SFTExportError(
+                    f"MS-Swift projection produced non-string content in {record['trajectory_id']}"
+                )
             if message["tool_name"] is not None:
                 dataset_message["tool_name"] = message["tool_name"]
             if message["call_id"] is not None:
                 dataset_message["call_id"] = message["call_id"]
             dataset_messages.append(dataset_message)
 
-        images: list[str] = []
-        for message in record["messages"]:
-            for image_ref in message["image_refs"]:
-                if image_ref not in images:
-                    images.append(image_ref)
+        placeholder_count = sum(
+            dataset_message["content"].count(IMAGE_PLACEHOLDER_TOKEN) for dataset_message in dataset_messages
+        )
+        if placeholder_count != len(images):
+            raise SFTExportError(
+                f"Placeholder/image mismatch in {record['trajectory_id']}: "
+                f"{placeholder_count} placeholders vs {len(images)} images"
+            )
+        if placeholder_ref_traversal != images:
+            raise SFTExportError(
+                f"Placeholder traversal order diverged from image order in {record['trajectory_id']}"
+            )
 
         swift_record = {
             "id": record["trajectory_id"],

@@ -16,6 +16,54 @@ from typing import Any
 
 from agentiad_recon.contracts import validate_payload
 
+IMAGE_PLACEHOLDER_TOKEN = "<image>"
+
+
+def _validate_swift_record_semantics(record: dict[str, Any]) -> None:
+    """Enforce MS-Swift multimodal message/content invariants beyond schema checks."""
+
+    record_id = record.get("id", "<unknown_record>")
+    messages = record.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ValueError(f"{record_id}: `messages` must be a non-empty list")
+
+    images = record.get("images")
+    if not isinstance(images, list):
+        raise ValueError(f"{record_id}: `images` must be a list")
+    if len(set(images)) != len(images):
+        raise ValueError(f"{record_id}: `images` must be first-occurrence ordered with no duplicates")
+
+    placeholder_count = 0
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise ValueError(f"{record_id}: message[{index}] must be an object")
+        content = message.get("content")
+        if isinstance(content, (list, dict)):
+            raise ValueError(f"{record_id}: message[{index}].content must be a string, not {type(content)!r}")
+        if not isinstance(content, str):
+            raise ValueError(f"{record_id}: message[{index}].content must be a string")
+        placeholder_count += content.count(IMAGE_PLACEHOLDER_TOKEN)
+
+        role = message.get("role")
+        if role != "assistant" and message.get("loss") is True:
+            raise ValueError(f"{record_id}: only assistant messages may set loss=true (message[{index}])")
+        if role == "tool":
+            tool_name = message.get("tool_name")
+            call_id = message.get("call_id")
+            if not isinstance(tool_name, str) or not tool_name:
+                raise ValueError(f"{record_id}: tool message[{index}] must include non-empty tool_name")
+            if not isinstance(call_id, str) or not call_id:
+                raise ValueError(f"{record_id}: tool message[{index}] must include non-empty call_id")
+
+    for image_index, image_path in enumerate(images):
+        if not isinstance(image_path, str) or not image_path.strip():
+            raise ValueError(f"{record_id}: images[{image_index}] must be a non-empty image path string")
+
+    if placeholder_count != len(images):
+        raise ValueError(
+            f"{record_id}: placeholder/image mismatch: {placeholder_count} `<image>` tokens vs {len(images)} images"
+        )
+
 
 def load_swift_recipe(path: str | Path) -> dict[str, Any]:
     """Load and validate the thin MS-Swift recipe/config surface."""
@@ -44,6 +92,7 @@ def validate_swift_record(record: dict[str, Any]) -> None:
     """Validate one projected MS-Swift dataset record."""
 
     validate_payload(record, "ms_swift_record.schema.json")
+    _validate_swift_record_semantics(record)
 
 
 def _build_parser() -> argparse.ArgumentParser:

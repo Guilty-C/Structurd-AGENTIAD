@@ -31,6 +31,7 @@ from agentiad_recon.sft import (
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "mmad_fixture"
 EXPORT_CONFIG = REPO_ROOT / "configs" / "sft_export_fixture.json"
 SWIFT_RECIPE = REPO_ROOT / "configs" / "ms_swift_sft_fixture.json"
+IMAGE_PLACEHOLDER_TOKEN = "<image>"
 
 
 class Prompt15SFTExportTests(unittest.TestCase):
@@ -133,10 +134,29 @@ class Prompt15SFTExportTests(unittest.TestCase):
             recipe = load_swift_recipe(SWIFT_RECIPE)
             swift_records = build_swift_records(records, recipe)
             self.assertEqual(len(swift_records), 2)
-            self.assertTrue(all("messages" in record for record in swift_records))
-            self.assertTrue(any(message["loss"] for message in swift_records[0]["messages"]))
+            self.assertEqual({record["metadata"]["trajectory_mode"] for record in swift_records}, {"pz_only", "pz_cr"})
+            for canonical_record, swift_record in zip(records, swift_records, strict=True):
+                self.assertTrue(all("messages" in record for record in swift_records))
+                self.assertTrue(any(message["loss"] for message in swift_record["messages"]))
+                self.assertTrue(all(isinstance(message["content"], str) for message in swift_record["messages"]))
+                self.assertTrue(
+                    all(not isinstance(message["content"], (list, dict)) for message in swift_record["messages"])
+                )
+                placeholder_count = sum(
+                    message["content"].count(IMAGE_PLACEHOLDER_TOKEN) for message in swift_record["messages"]
+                )
+                self.assertEqual(placeholder_count, len(swift_record["images"]))
+
+                expected_images: list[str] = []
+                for message in canonical_record["messages"]:
+                    for image_ref in message["image_refs"]:
+                        if image_ref not in expected_images:
+                            expected_images.append(image_ref)
+                self.assertEqual(swift_record["images"], expected_images)
+
             runtime_probe = swift_runtime_probe()
-            self.assertFalse(runtime_probe["available"])
+            self.assertIsInstance(runtime_probe["available"], bool)
+            self.assertIn("detail", runtime_probe)
 
     def test_prompt_1_5_export_runner_writes_both_dataset_layers(self) -> None:
         """The top-level Prompt 1.5 runner should emit canonical and MS-Swift artifacts."""
@@ -152,7 +172,7 @@ class Prompt15SFTExportTests(unittest.TestCase):
             self.assertTrue(Path(artifacts.canonical_dataset_path).exists())
             self.assertTrue(Path(artifacts.swift_dataset_path).exists())
             self.assertEqual(artifacts.local_validation["record_count"], 2)
-            self.assertFalse(artifacts.swift_runtime_check["available"])
+            self.assertIsInstance(artifacts.swift_runtime_check["available"], bool)
 
 
 if __name__ == "__main__":

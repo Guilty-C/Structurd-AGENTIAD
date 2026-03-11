@@ -29,18 +29,7 @@
             "enum": ["system", "user", "assistant", "tool"]
           },
           "content": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["type"],
-              "properties": {
-                "type": { "type": "string", "enum": ["text", "image"] },
-                "text": { "type": "string" },
-                "image": { "type": "string" }
-              }
-            }
+            "type": "string"
           },
           "loss": { "type": "boolean" },
           "tool_name": { "type": "string" },
