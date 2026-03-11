@@ -48,6 +48,31 @@
         "count_above_8192": { "type": "integer", "minimum": 0 }
       }
     },
+    "length_audit_proxy_path": { "type": "string" },
+    "length_audit_proxy_summary": { "type": "object" },
+    "length_audit_true_path": { "type": "string" },
+    "length_audit_true_summary": { "type": "object" },
+    "filtered_exports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "threshold",
+          "dataset_path",
+          "manifest_path",
+          "kept_count",
+          "dropped_count"
+        ],
+        "properties": {
+          "threshold": { "type": "integer", "enum": [4096, 8192] },
+          "dataset_path": { "type": "string" },
+          "manifest_path": { "type": "string" },
+          "kept_count": { "type": "integer", "minimum": 0 },
+          "dropped_count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
     "runtime_probe": { "type": "object" },
     "notes": {
       "type": "array",

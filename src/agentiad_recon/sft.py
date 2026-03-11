@@ -22,6 +22,7 @@ from agentiad_recon.backends import BackendRequest, MockToolAwareBackend
 from agentiad_recon.contracts import validate_payload
 from agentiad_recon.mmad import MMADIndexer
 from agentiad_recon.ms_swift_adapter import (
+    compute_true_length_audit,
     load_swift_recipe,
     swift_runtime_probe,
     validate_swift_record,
@@ -65,6 +66,9 @@ class SFTArtifacts:
     swift_runtime_check: dict[str, Any]
     swift_length_audit_path: str
     swift_length_audit_summary: dict[str, Any]
+    swift_proxy_length_audit_path: str
+    swift_proxy_length_audit_summary: dict[str, Any]
+    swift_filtered_manifests: dict[str, str]
     local_validation: dict[str, Any]
 
 
@@ -714,8 +718,8 @@ def _nearest_rank(sorted_values: list[int], percentile: int) -> int:
     return sorted_values[rank - 1]
 
 
-def _build_length_audit(swift_records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Build lightweight length statistics for compact MS-Swift-facing records."""
+def _build_proxy_length_audit(swift_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build proxy length statistics for compact MS-Swift-facing records."""
 
     if not swift_records:
         raise SFTExportError("Cannot build length audit for an empty MS-Swift dataset.")
@@ -738,6 +742,9 @@ def _build_length_audit(swift_records: list[dict[str, Any]]) -> dict[str, Any]:
     top_rows = sorted(rows, key=lambda row: row["token_estimate"], reverse=True)[:5]
     return {
         "length_unit": "whitespace_token_estimate_from_message_content",
+        "true_multimodal_encode": False,
+        "backend": "proxy_whitespace_split",
+        "backend_detail": "does_not_include_true_template_or_visual_expansion",
         "record_count": len(rows),
         "p50": _nearest_rank(token_lengths, 50),
         "p90": _nearest_rank(token_lengths, 90),
@@ -834,7 +841,8 @@ def export_swift_dataset(
     canonical_records: list[dict[str, Any]],
     recipe_path: str | Path,
     output_root: str | Path,
-) -> tuple[Path, Path, Path, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    strict_true_length_audit: bool = False,
+) -> dict[str, Any]:
     """Write the thin MS-Swift dataset projection and a recipe manifest."""
 
     recipe = load_swift_recipe(recipe_path)
@@ -847,9 +855,54 @@ def export_swift_dataset(
         "\n".join(json.dumps(record, sort_keys=True) for record in swift_records) + "\n",
         encoding="utf-8",
     )
-    length_audit = _build_length_audit(swift_records)
-    length_audit_path = output_directory / f"{Path(recipe['dataset']['output_jsonl']).stem}.length_audit.json"
-    length_audit_path.write_text(json.dumps(length_audit, indent=2, sort_keys=True), encoding="utf-8")
+    stem = Path(recipe["dataset"]["output_jsonl"]).stem
+    proxy_length_audit = _build_proxy_length_audit(swift_records)
+    proxy_length_audit_path = output_directory / f"{stem}.length_audit.proxy.json"
+    proxy_length_audit_path.write_text(json.dumps(proxy_length_audit, indent=2, sort_keys=True), encoding="utf-8")
+
+    true_length_audit = compute_true_length_audit(swift_records, recipe, strict=strict_true_length_audit)
+    true_length_audit_path = output_directory / f"{stem}.length_audit.true.json"
+    true_length_audit_path.write_text(json.dumps(true_length_audit, indent=2, sort_keys=True), encoding="utf-8")
+
+    true_lengths = {row["id"]: int(row["encoded_length"]) for row in true_length_audit["lengths"]}
+    filtered_exports: list[dict[str, Any]] = []
+    filtered_manifest_paths: dict[str, str] = {}
+    for threshold in (4096, 8192):
+        kept_records = [record for record in swift_records if true_lengths[record["id"]] <= threshold]
+        dropped_rows = [row for row in true_length_audit["lengths"] if row["encoded_length"] > threshold]
+
+        filtered_dataset_path = output_directory / f"{stem}_le{threshold}.jsonl"
+        filtered_dataset_path.write_text(
+            "\n".join(json.dumps(record, sort_keys=True) for record in kept_records) + ("\n" if kept_records else ""),
+            encoding="utf-8",
+        )
+        filtered_manifest = {
+            "record_count": len(kept_records),
+            "threshold": threshold,
+            "parent_dataset_path": str(swift_dataset_path.resolve()),
+            "parent_dataset_sha256": sha256_file(swift_dataset_path),
+            "kept_dataset_path": str(filtered_dataset_path.resolve()),
+            "kept_count": len(kept_records),
+            "dropped_count": len(dropped_rows),
+            "true_length_audit_path": str(true_length_audit_path.resolve()),
+            "dropped_top_offenders": sorted(
+                dropped_rows,
+                key=lambda row: row["encoded_length"],
+                reverse=True,
+            )[:10],
+        }
+        filtered_manifest_path = output_directory / f"{stem}_le{threshold}.manifest.json"
+        filtered_manifest_path.write_text(json.dumps(filtered_manifest, indent=2, sort_keys=True), encoding="utf-8")
+        filtered_exports.append(
+            {
+                "threshold": threshold,
+                "dataset_path": str(filtered_dataset_path.resolve()),
+                "manifest_path": str(filtered_manifest_path.resolve()),
+                "kept_count": len(kept_records),
+                "dropped_count": len(dropped_rows),
+            }
+        )
+        filtered_manifest_paths[str(threshold)] = str(filtered_manifest_path.resolve())
 
     runtime_probe = swift_runtime_probe()
     manifest = {
@@ -857,27 +910,50 @@ def export_swift_dataset(
         "record_count": len(swift_records),
         "swift_dataset_path": str(swift_dataset_path.resolve()),
         "swift_dataset_sha256": sha256_file(swift_dataset_path),
-        "length_audit_path": str(length_audit_path.resolve()),
-        "length_audit_summary": {
-            "record_count": length_audit["record_count"],
-            "p50": length_audit["p50"],
-            "p90": length_audit["p90"],
-            "p95": length_audit["p95"],
-            "p99": length_audit["p99"],
-            "max": length_audit["max"],
-            "count_above_4096": length_audit["count_above_4096"],
-            "count_above_8192": length_audit["count_above_8192"],
+        "length_audit_proxy_path": str(proxy_length_audit_path.resolve()),
+        "length_audit_proxy_summary": {
+            "record_count": proxy_length_audit["record_count"],
+            "p50": proxy_length_audit["p50"],
+            "p90": proxy_length_audit["p90"],
+            "p95": proxy_length_audit["p95"],
+            "p99": proxy_length_audit["p99"],
+            "max": proxy_length_audit["max"],
+            "count_above_4096": proxy_length_audit["count_above_4096"],
+            "count_above_8192": proxy_length_audit["count_above_8192"],
         },
+        "length_audit_true_path": str(true_length_audit_path.resolve()),
+        "length_audit_true_summary": {
+            "record_count": true_length_audit["record_count"],
+            "p50": true_length_audit["p50"],
+            "p90": true_length_audit["p90"],
+            "p95": true_length_audit["p95"],
+            "p99": true_length_audit["p99"],
+            "max": true_length_audit["max"],
+            "count_above_4096": true_length_audit["count_above_4096"],
+            "count_above_8192": true_length_audit["count_above_8192"],
+            "true_multimodal_encode": true_length_audit["true_multimodal_encode"],
+        },
+        "filtered_exports": filtered_exports,
         "runtime_probe": runtime_probe,
         "notes": [
             "This dataset is adapter-generated for later MS-Swift ownership.",
-            "Local Prompt 1.5 validation checks compact export format and length audit.",
+            "Local Prompt 1.7 adds true-length audit plus threshold-clean filtered datasets.",
         ],
     }
     validate_payload(manifest, "sft_dataset_manifest.schema.json")
     manifest_path = output_directory / recipe["dataset"]["manifest_json"]
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
-    return swift_dataset_path, manifest_path, length_audit_path, recipe, runtime_probe, length_audit
+    return {
+        "swift_dataset_path": swift_dataset_path,
+        "swift_manifest_path": manifest_path,
+        "proxy_length_audit_path": proxy_length_audit_path,
+        "proxy_length_audit": proxy_length_audit,
+        "true_length_audit_path": true_length_audit_path,
+        "true_length_audit": true_length_audit,
+        "filtered_manifest_paths": filtered_manifest_paths,
+        "recipe": recipe,
+        "runtime_probe": runtime_probe,
+    }
 
 
 def run_prompt_1_5_export(
@@ -887,6 +963,7 @@ def run_prompt_1_5_export(
     dataset_root: str | Path | None = None,
     output_root: str | Path | None = None,
     max_samples_per_mode: int | None = None,
+    strict_true_length_audit: bool = False,
 ) -> SFTArtifacts:
     """Run the full local Prompt 1.5 export, validation, and adapter projection."""
 
@@ -903,20 +980,24 @@ def run_prompt_1_5_export(
         {"records": [sha256_bytes(canonical_json_bytes(record)) for record in records]}
     )
 
-    swift_dataset_path, swift_manifest_path, swift_length_audit_path, _recipe, runtime_probe, length_audit = export_swift_dataset(
+    swift_export = export_swift_dataset(
         canonical_records=records,
         recipe_path=swift_recipe_path,
         output_root=resolved_output_root,
+        strict_true_length_audit=strict_true_length_audit,
     )
     return SFTArtifacts(
         canonical_dataset_path=str((resolved_output_root / definition["output"]["canonical_dataset"]).resolve()),
         canonical_manifest_path=export_metadata["manifest_path"],
-        swift_dataset_path=str(swift_dataset_path.resolve()),
-        swift_manifest_path=str(swift_manifest_path.resolve()),
+        swift_dataset_path=str(swift_export["swift_dataset_path"].resolve()),
+        swift_manifest_path=str(swift_export["swift_manifest_path"].resolve()),
         swift_recipe_path=str(_resolve_path(swift_recipe_path)),
-        swift_runtime_check=runtime_probe,
-        swift_length_audit_path=str(swift_length_audit_path.resolve()),
-        swift_length_audit_summary=length_audit,
+        swift_runtime_check=swift_export["runtime_probe"],
+        swift_length_audit_path=str(swift_export["true_length_audit_path"].resolve()),
+        swift_length_audit_summary=swift_export["true_length_audit"],
+        swift_proxy_length_audit_path=str(swift_export["proxy_length_audit_path"].resolve()),
+        swift_proxy_length_audit_summary=swift_export["proxy_length_audit"],
+        swift_filtered_manifests=swift_export["filtered_manifest_paths"],
         local_validation=local_validation,
     )
 
@@ -932,6 +1013,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-root", help="Optional dataset root override.")
     parser.add_argument("--output-root", help="Optional artifact root override.")
     parser.add_argument("--max-samples-per-mode", type=int, help="Optional sample cap per trajectory mode.")
+    parser.add_argument(
+        "--strict-true-length-audit",
+        action="store_true",
+        help="Fail export if true multimodal length audit cannot use a real local processor/tokenizer encode path.",
+    )
     return parser
 
 
@@ -945,6 +1031,7 @@ def main() -> int:
         dataset_root=args.dataset_root,
         output_root=args.output_root,
         max_samples_per_mode=args.max_samples_per_mode,
+        strict_true_length_audit=args.strict_true_length_audit,
     )
     print(
         json.dumps(
@@ -957,6 +1044,9 @@ def main() -> int:
                 "swift_runtime_check": artifacts.swift_runtime_check,
                 "swift_length_audit_path": artifacts.swift_length_audit_path,
                 "swift_length_audit_summary": artifacts.swift_length_audit_summary,
+                "swift_proxy_length_audit_path": artifacts.swift_proxy_length_audit_path,
+                "swift_proxy_length_audit_summary": artifacts.swift_proxy_length_audit_summary,
+                "swift_filtered_manifests": artifacts.swift_filtered_manifests,
                 "local_validation": artifacts.local_validation,
             },
             indent=2,

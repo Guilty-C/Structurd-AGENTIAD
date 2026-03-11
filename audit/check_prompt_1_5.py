@@ -175,12 +175,28 @@ def main() -> int:
             "local validation checks exemplar linkage",
             failures,
         )
-        require(Path(artifacts.swift_length_audit_path).exists(), "compact export length-audit sidecar exists", failures)
+        require(Path(artifacts.swift_length_audit_path).exists(), "true length-audit sidecar exists", failures)
+        require(Path(artifacts.swift_proxy_length_audit_path).exists(), "proxy length-audit sidecar exists", failures)
         length_audit = json.loads(Path(artifacts.swift_length_audit_path).read_text(encoding="utf-8"))
         require(
             all(key in length_audit for key in ["record_count", "p50", "p90", "p95", "p99", "max", "top_offenders"]),
             "length audit includes percentile and offender fields",
             failures,
+        )
+        print(
+            "INFO: true_length_audit_summary",
+            json.dumps(
+                {
+                    "backend": length_audit.get("backend"),
+                    "true_multimodal_encode": length_audit.get("true_multimodal_encode"),
+                    "record_count": length_audit.get("record_count"),
+                    "p95": length_audit.get("p95"),
+                    "max": length_audit.get("max"),
+                    "count_above_4096": length_audit.get("count_above_4096"),
+                    "count_above_8192": length_audit.get("count_above_8192"),
+                },
+                sort_keys=True,
+            ),
         )
         require(
             all(
@@ -209,6 +225,47 @@ def main() -> int:
             "local run reports MS-Swift runtime availability as a boolean probe",
             failures,
         )
+        require(
+            all(key in artifacts.swift_filtered_manifests for key in ["4096", "8192"]),
+            "filtered manifest mapping includes 4096 and 8192",
+            failures,
+        )
+        true_lengths = {row["id"]: row["encoded_length"] for row in length_audit["lengths"]}
+        for threshold in (4096, 8192):
+            threshold_key = str(threshold)
+            manifest_path = Path(artifacts.swift_filtered_manifests[threshold_key])
+            require(manifest_path.exists(), f"filtered manifest exists for <= {threshold}", failures)
+            filtered_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            require(filtered_manifest["threshold"] == threshold, f"filtered manifest threshold matches {threshold}", failures)
+            filtered_dataset_path = Path(filtered_manifest["kept_dataset_path"])
+            require(filtered_dataset_path.exists(), f"filtered dataset exists for <= {threshold}", failures)
+            filtered_records = [
+                json.loads(line)
+                for line in filtered_dataset_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            require(
+                all(true_lengths[record["id"]] <= threshold for record in filtered_records),
+                f"filtered dataset is threshold-clean for <= {threshold}",
+                failures,
+            )
+            require(
+                filtered_manifest["kept_count"] + filtered_manifest["dropped_count"] == len(swift_records),
+                f"filtered kept+dropped is consistent for <= {threshold}",
+                failures,
+            )
+            require(filtered_manifest["kept_count"] > 0, f"filtered dataset is non-empty for <= {threshold}", failures)
+            print(
+                f"INFO: filtered_le{threshold}_summary",
+                json.dumps(
+                    {
+                        "kept_count": filtered_manifest["kept_count"],
+                        "dropped_count": filtered_manifest["dropped_count"],
+                        "threshold": filtered_manifest["threshold"],
+                    },
+                    sort_keys=True,
+                ),
+            )
 
     runtime_probe = swift_runtime_probe()
     require(isinstance(runtime_probe["available"], bool), "runtime probe returns boolean availability", failures)

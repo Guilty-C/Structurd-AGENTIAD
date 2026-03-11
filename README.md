@@ -108,6 +108,7 @@ Trajectory reconstruction for SFT is now part of the local audited repo state.
 - `src/agentiad_recon/ms_swift_adapter.py` adds a thin MS-Swift adapter/config layer rather than a custom trainer
 - Prompt 1.5 MS-Swift records now use string-only `messages[*].content` with `<image>` placeholders, and enforce placeholder/image count plus first-occurrence ordering alignment in `images`
 - Prompt 1.6 keeps canonical trajectories unchanged but compacts only the MS-Swift-facing text rendering (deduplicated tool-request prose, compact tool-response payloads) and emits a lightweight length-audit sidecar for max-length planning
+- Prompt 1.7 adds dual length audits (`proxy` and `true`) plus threshold-clean MS-Swift exports (`<=4096` and `<=8192`) with kept/dropped manifest summaries for remote smoke planning
 - `configs/sft_export_fixture.json` freezes the local fixture-backed SFT export definition
 - `configs/sft_export_remote_template.json` freezes the remote-only full export definition
 - `configs/ms_swift_sft_fixture.json` freezes the local MS-Swift adapter recipe

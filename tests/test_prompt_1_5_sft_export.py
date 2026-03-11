@@ -190,10 +190,36 @@ class Prompt15SFTExportTests(unittest.TestCase):
             self.assertTrue(Path(artifacts.canonical_dataset_path).exists())
             self.assertTrue(Path(artifacts.swift_dataset_path).exists())
             self.assertTrue(Path(artifacts.swift_length_audit_path).exists())
+            self.assertTrue(Path(artifacts.swift_proxy_length_audit_path).exists())
             self.assertEqual(artifacts.local_validation["record_count"], 2)
             self.assertIsInstance(artifacts.swift_runtime_check["available"], bool)
             self.assertIn("p95", artifacts.swift_length_audit_summary)
             self.assertIn("top_offenders", artifacts.swift_length_audit_summary)
+            self.assertIn("4096", artifacts.swift_filtered_manifests)
+            self.assertIn("8192", artifacts.swift_filtered_manifests)
+            self.assertTrue(Path(artifacts.swift_filtered_manifests["4096"]).exists())
+            self.assertTrue(Path(artifacts.swift_filtered_manifests["8192"]).exists())
+
+            true_audit_rows = {
+                row["id"]: row["encoded_length"]
+                for row in artifacts.swift_length_audit_summary["lengths"]
+            }
+            for threshold in (4096, 8192):
+                threshold_key = str(threshold)
+                filtered_manifest = json.loads(
+                    Path(artifacts.swift_filtered_manifests[threshold_key]).read_text(encoding="utf-8")
+                )
+                self.assertEqual(filtered_manifest["threshold"], threshold)
+                filtered_dataset_path = Path(filtered_manifest["kept_dataset_path"])
+                self.assertTrue(filtered_dataset_path.exists())
+                filtered_records = [
+                    json.loads(line)
+                    for line in filtered_dataset_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                self.assertTrue(
+                    all(true_audit_rows[record["id"]] <= threshold for record in filtered_records)
+                )
 
 
 if __name__ == "__main__":

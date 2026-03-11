@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 from agentiad_recon.contracts import validate_payload
 
 IMAGE_PLACEHOLDER_TOKEN = "<image>"
+FALLBACK_IMAGE_TOKEN_BUDGET = 256
+FALLBACK_MESSAGE_OVERHEAD = 16
 
 
 def _validate_swift_record_semantics(record: dict[str, Any]) -> None:
@@ -93,6 +96,141 @@ def validate_swift_record(record: dict[str, Any]) -> None:
 
     validate_payload(record, "ms_swift_record.schema.json")
     _validate_swift_record_semantics(record)
+
+
+def _nearest_rank(sorted_values: list[int], percentile: int) -> int:
+    """Compute nearest-rank percentile from a pre-sorted non-empty integer list."""
+
+    rank = max(1, math.ceil((percentile / 100.0) * len(sorted_values)))
+    return sorted_values[rank - 1]
+
+
+def _fallback_encoded_length(record: dict[str, Any]) -> int:
+    """Fallback estimate when no local Swift-compatible processor is available."""
+
+    text_tokens = sum(len(message["content"].split()) for message in record["messages"])
+    image_tokens = FALLBACK_IMAGE_TOKEN_BUDGET * len(record["images"])
+    wrapper_tokens = FALLBACK_MESSAGE_OVERHEAD * len(record["messages"])
+    return int(text_tokens + image_tokens + wrapper_tokens)
+
+
+def _transformers_processor_encoder(model_id_or_path: str):
+    """Build an encoded-length callable using local HF processor/tokenizer assets."""
+
+    try:
+        from PIL import Image
+        from transformers import AutoProcessor
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"processor_import_failed:{exc}") from exc
+
+    try:
+        processor = AutoProcessor.from_pretrained(
+            model_id_or_path,
+            trust_remote_code=True,
+            local_files_only=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"processor_load_failed:{exc}") from exc
+
+    def encode(record: dict[str, Any]) -> int:
+        images = record["images"]
+        image_cursor = 0
+        chat_messages: list[dict[str, Any]] = []
+        opened_images = []
+        try:
+            for message in record["messages"]:
+                role = message["role"] if message["role"] in {"system", "user", "assistant"} else "assistant"
+                text = message["content"]
+                parts = text.split(IMAGE_PLACEHOLDER_TOKEN)
+                blocks: list[dict[str, Any]] = []
+                for index, part in enumerate(parts):
+                    if part:
+                        blocks.append({"type": "text", "text": part})
+                    if index < len(parts) - 1:
+                        if image_cursor >= len(images):
+                            raise RuntimeError("placeholder_image_cursor_overflow")
+                        image_path = images[image_cursor]
+                        opened_images.append(Image.open(image_path).convert("RGB"))
+                        blocks.append({"type": "image", "image": opened_images[-1]})
+                        image_cursor += 1
+                if not blocks:
+                    blocks.append({"type": "text", "text": ""})
+                chat_messages.append({"role": role, "content": blocks})
+
+            rendered = processor.apply_chat_template(
+                chat_messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            encoded = processor(text=[rendered], images=opened_images, return_tensors="pt")
+            input_ids = encoded["input_ids"]
+            return int(input_ids.shape[-1])
+        finally:
+            for image in opened_images:
+                image.close()
+
+    return encode
+
+
+def compute_true_length_audit(
+    records: list[dict[str, Any]],
+    recipe: dict[str, Any],
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Compute a true-or-annotated-fallback multimodal length audit for Swift records."""
+
+    if not records:
+        raise ValueError("Cannot compute length audit for an empty record list")
+
+    model_id_or_path = recipe.get("training", {}).get("model_id_or_path", "")
+    backend = "fallback_proxy_with_visual_and_template_budget"
+    backend_detail = "processor_unavailable"
+    encoder = _fallback_encoded_length
+    true_multimodal = False
+
+    try:
+        encoder = _transformers_processor_encoder(model_id_or_path)
+        backend = "transformers_processor_local_encode"
+        backend_detail = f"loaded:{model_id_or_path}"
+        true_multimodal = True
+    except Exception as exc:  # noqa: BLE001
+        backend_detail = str(exc)
+        if strict:
+            raise RuntimeError(
+                f"True multimodal length audit failed in strict mode: {backend_detail}"
+            ) from exc
+
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        length = int(encoder(record))
+        rows.append(
+            {
+                "id": record["id"],
+                "sample_id": record["metadata"]["sample_id"],
+                "trajectory_mode": record["metadata"]["trajectory_mode"],
+                "encoded_length": length,
+            }
+        )
+
+    sorted_lengths = sorted(row["encoded_length"] for row in rows)
+    top_rows = sorted(rows, key=lambda row: row["encoded_length"], reverse=True)[:10]
+    return {
+        "audit_type": "multimodal_length_audit",
+        "true_multimodal_encode": true_multimodal,
+        "backend": backend,
+        "backend_detail": backend_detail,
+        "record_count": len(rows),
+        "p50": _nearest_rank(sorted_lengths, 50),
+        "p90": _nearest_rank(sorted_lengths, 90),
+        "p95": _nearest_rank(sorted_lengths, 95),
+        "p99": _nearest_rank(sorted_lengths, 99),
+        "max": sorted_lengths[-1],
+        "count_above_4096": sum(1 for value in sorted_lengths if value > 4096),
+        "count_above_8192": sum(1 for value in sorted_lengths if value > 8192),
+        "top_offenders": top_rows,
+        "lengths": rows,
+    }
 
 
 def _build_parser() -> argparse.ArgumentParser:
