@@ -144,6 +144,17 @@ def main() -> int:
         )
         require(
             all(
+                isinstance(image, str)
+                and bool(image.strip())
+                and not isinstance(image, dict)
+                for record in swift_records
+                for image in record["images"]
+            ),
+            "MS-Swift images are non-empty string paths (not dict entries)",
+            failures,
+        )
+        require(
+            all(
                 sum(message["content"].count(IMAGE_PLACEHOLDER_TOKEN) for message in record["messages"])
                 == len(record["images"])
                 for record in swift_records

@@ -142,6 +142,8 @@ class Prompt15SFTExportTests(unittest.TestCase):
                 self.assertTrue(
                     all(not isinstance(message["content"], (list, dict)) for message in swift_record["messages"])
                 )
+                self.assertTrue(all(isinstance(image, str) and bool(image.strip()) for image in swift_record["images"]))
+                self.assertTrue(all(not isinstance(image, dict) for image in swift_record["images"]))
                 placeholder_count = sum(
                     message["content"].count(IMAGE_PLACEHOLDER_TOKEN) for message in swift_record["messages"]
                 )
