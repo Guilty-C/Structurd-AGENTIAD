@@ -178,6 +178,7 @@ def main() -> int:
         require(Path(artifacts.swift_length_audit_path).exists(), "true length-audit sidecar exists", failures)
         require(Path(artifacts.swift_proxy_length_audit_path).exists(), "proxy length-audit sidecar exists", failures)
         length_audit = json.loads(Path(artifacts.swift_length_audit_path).read_text(encoding="utf-8"))
+        swift_manifest = json.loads(Path(artifacts.swift_manifest_path).read_text(encoding="utf-8"))
         require(
             all(key in length_audit for key in ["record_count", "p50", "p90", "p95", "p99", "max", "top_offenders"]),
             "length audit includes percentile and offender fields",
@@ -245,6 +246,11 @@ def main() -> int:
             "filtered manifest mapping includes 4096 and 8192",
             failures,
         )
+        require(
+            "filtered_export_summary_by_threshold" in swift_manifest,
+            "main manifest includes filtered-export summary by threshold",
+            failures,
+        )
         true_lengths = {row["id"]: row["encoded_length"] for row in length_audit["lengths"]}
         for threshold in (4096, 8192):
             threshold_key = str(threshold)
@@ -262,6 +268,12 @@ def main() -> int:
                         "length_audit_backend",
                         "strict_true_length_audit_requested",
                         "strict_true_length_audit_passed",
+                        "source_swift_dataset_path",
+                        "source_true_audit_path",
+                        "dropped_ratio",
+                        "top_dropped_offenders",
+                        "max_kept_encoded_length",
+                        "min_dropped_encoded_length",
                     ]
                 ),
                 f"filtered manifest includes truthful fields for <= {threshold}",
@@ -284,7 +296,65 @@ def main() -> int:
                 f"filtered kept+dropped is consistent for <= {threshold}",
                 failures,
             )
+            require(
+                abs(filtered_manifest["dropped_ratio"] - (filtered_manifest["dropped_count"] / len(swift_records))) < 1e-9,
+                f"filtered dropped_ratio is consistent for <= {threshold}",
+                failures,
+            )
+            require(
+                Path(filtered_manifest["source_swift_dataset_path"]).resolve() == Path(artifacts.swift_dataset_path).resolve(),
+                f"filtered manifest source dataset path is correct for <= {threshold}",
+                failures,
+            )
+            require(
+                Path(filtered_manifest["source_true_audit_path"]).resolve() == Path(artifacts.swift_length_audit_path).resolve(),
+                f"filtered manifest source true-audit path is correct for <= {threshold}",
+                failures,
+            )
             require(filtered_manifest["kept_count"] > 0, f"filtered dataset is non-empty for <= {threshold}", failures)
+            if filtered_manifest["kept_count"] > 0:
+                require(
+                    filtered_manifest["max_kept_encoded_length"] <= threshold,
+                    f"max kept encoded length obeys threshold for <= {threshold}",
+                    failures,
+                )
+            if filtered_manifest["dropped_count"] > 0:
+                require(
+                    filtered_manifest["min_dropped_encoded_length"] > threshold,
+                    f"min dropped encoded length exceeds threshold for <= {threshold}",
+                    failures,
+                )
+                offender_lengths = [row["encoded_length"] for row in filtered_manifest["top_dropped_offenders"]]
+                require(
+                    len(offender_lengths) > 0 and all(length > threshold for length in offender_lengths),
+                    f"top dropped offenders are over-threshold for <= {threshold}",
+                    failures,
+                )
+                require(
+                    offender_lengths == sorted(offender_lengths, reverse=True),
+                    f"top dropped offenders are sorted desc for <= {threshold}",
+                    failures,
+                )
+            else:
+                require(
+                    filtered_manifest["min_dropped_encoded_length"] is None,
+                    f"min dropped encoded length is null when no rows dropped for <= {threshold}",
+                    failures,
+                )
+                require(
+                    len(filtered_manifest["top_dropped_offenders"]) == 0,
+                    f"top dropped offenders is empty when no rows dropped for <= {threshold}",
+                    failures,
+                )
+            summary = swift_manifest["filtered_export_summary_by_threshold"][threshold_key]
+            require(summary["threshold"] == threshold, f"main manifest summary threshold matches {threshold}", failures)
+            require(summary["kept_count"] == filtered_manifest["kept_count"], f"main manifest kept_count matches for <= {threshold}", failures)
+            require(summary["dropped_count"] == filtered_manifest["dropped_count"], f"main manifest dropped_count matches for <= {threshold}", failures)
+            require(
+                abs(summary["dropped_ratio"] - filtered_manifest["dropped_ratio"]) < 1e-9,
+                f"main manifest dropped_ratio matches for <= {threshold}",
+                failures,
+            )
             if length_audit.get("true_multimodal_encode"):
                 require(
                     filtered_manifest["true_threshold_clean_certified"] is True

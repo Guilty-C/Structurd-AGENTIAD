@@ -204,19 +204,39 @@ class Prompt15SFTExportTests(unittest.TestCase):
             self.assertTrue(Path(artifacts.swift_filtered_manifests["8192"]).exists())
             self.assertIn("strict_true_length_audit_passed", artifacts.resolved_remote_surfaces_summary)
             self.assertIn("threshold_clean_basis", artifacts.resolved_remote_surfaces_summary)
+            swift_manifest = json.loads(Path(artifacts.swift_manifest_path).read_text(encoding="utf-8"))
+            self.assertIn("filtered_export_summary_by_threshold", swift_manifest)
 
             true_audit_rows = {
                 row["id"]: row["encoded_length"]
                 for row in artifacts.swift_length_audit_summary["lengths"]
             }
+            total_count = len(true_audit_rows)
             for threshold in (4096, 8192):
                 threshold_key = str(threshold)
                 filtered_manifest = json.loads(
                     Path(artifacts.swift_filtered_manifests[threshold_key]).read_text(encoding="utf-8")
                 )
                 self.assertEqual(filtered_manifest["threshold"], threshold)
-                self.assertIn("threshold_clean_basis", filtered_manifest)
-                self.assertIn("true_threshold_clean_certified", filtered_manifest)
+                self.assertTrue(
+                    all(
+                        key in filtered_manifest
+                        for key in [
+                            "source_swift_dataset_path",
+                            "source_true_audit_path",
+                            "kept_count",
+                            "dropped_count",
+                            "dropped_ratio",
+                            "threshold_clean_basis",
+                            "true_threshold_clean_certified",
+                            "true_multimodal_encode",
+                            "length_audit_backend",
+                            "top_dropped_offenders",
+                            "max_kept_encoded_length",
+                            "min_dropped_encoded_length",
+                        ]
+                    )
+                )
                 filtered_dataset_path = Path(filtered_manifest["kept_dataset_path"])
                 self.assertTrue(filtered_dataset_path.exists())
                 filtered_records = [
@@ -227,6 +247,26 @@ class Prompt15SFTExportTests(unittest.TestCase):
                 self.assertTrue(
                     all(true_audit_rows[record["id"]] <= threshold for record in filtered_records)
                 )
+                self.assertAlmostEqual(
+                    filtered_manifest["dropped_ratio"],
+                    filtered_manifest["dropped_count"] / total_count,
+                )
+                if filtered_records:
+                    self.assertLessEqual(filtered_manifest["max_kept_encoded_length"], threshold)
+                if filtered_manifest["dropped_count"] > 0:
+                    self.assertGreater(filtered_manifest["min_dropped_encoded_length"], threshold)
+                    offender_lengths = [row["encoded_length"] for row in filtered_manifest["top_dropped_offenders"]]
+                    self.assertTrue(all(length > threshold for length in offender_lengths))
+                    self.assertEqual(offender_lengths, sorted(offender_lengths, reverse=True))
+                else:
+                    self.assertIsNone(filtered_manifest["min_dropped_encoded_length"])
+                    self.assertEqual(filtered_manifest["top_dropped_offenders"], [])
+
+                main_summary = swift_manifest["filtered_export_summary_by_threshold"][threshold_key]
+                self.assertEqual(main_summary["threshold"], threshold)
+                self.assertEqual(main_summary["kept_count"], filtered_manifest["kept_count"])
+                self.assertEqual(main_summary["dropped_count"], filtered_manifest["dropped_count"])
+                self.assertAlmostEqual(main_summary["dropped_ratio"], filtered_manifest["dropped_ratio"])
                 if artifacts.swift_length_audit_summary["true_multimodal_encode"]:
                     self.assertTrue(filtered_manifest["true_threshold_clean_certified"])
                     self.assertEqual(filtered_manifest["threshold_clean_basis"], "true_multimodal_encode")

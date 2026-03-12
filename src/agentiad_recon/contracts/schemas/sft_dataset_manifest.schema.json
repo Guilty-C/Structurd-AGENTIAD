@@ -64,6 +64,9 @@
           "manifest_path",
           "kept_count",
           "dropped_count",
+          "dropped_ratio",
+          "true_multimodal_encode",
+          "length_audit_backend",
           "threshold_clean_basis",
           "true_threshold_clean_certified"
         ],
@@ -73,8 +76,74 @@
           "manifest_path": { "type": "string" },
           "kept_count": { "type": "integer", "minimum": 0 },
           "dropped_count": { "type": "integer", "minimum": 0 },
+          "dropped_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+          "true_multimodal_encode": { "type": "boolean" },
+          "length_audit_backend": { "type": "string", "minLength": 1 },
           "threshold_clean_basis": { "type": "string", "minLength": 1 },
           "true_threshold_clean_certified": { "type": "boolean" }
+        }
+      }
+    },
+    "filtered_export_summary_by_threshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["4096", "8192"],
+      "properties": {
+        "4096": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "threshold",
+            "dataset_path",
+            "manifest_path",
+            "kept_count",
+            "dropped_count",
+            "dropped_ratio",
+            "true_multimodal_encode",
+            "length_audit_backend",
+            "threshold_clean_basis",
+            "true_threshold_clean_certified"
+          ],
+          "properties": {
+            "threshold": { "type": "integer", "const": 4096 },
+            "dataset_path": { "type": "string" },
+            "manifest_path": { "type": "string" },
+            "kept_count": { "type": "integer", "minimum": 0 },
+            "dropped_count": { "type": "integer", "minimum": 0 },
+            "dropped_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+            "true_multimodal_encode": { "type": "boolean" },
+            "length_audit_backend": { "type": "string", "minLength": 1 },
+            "threshold_clean_basis": { "type": "string", "minLength": 1 },
+            "true_threshold_clean_certified": { "type": "boolean" }
+          }
+        },
+        "8192": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "threshold",
+            "dataset_path",
+            "manifest_path",
+            "kept_count",
+            "dropped_count",
+            "dropped_ratio",
+            "true_multimodal_encode",
+            "length_audit_backend",
+            "threshold_clean_basis",
+            "true_threshold_clean_certified"
+          ],
+          "properties": {
+            "threshold": { "type": "integer", "const": 8192 },
+            "dataset_path": { "type": "string" },
+            "manifest_path": { "type": "string" },
+            "kept_count": { "type": "integer", "minimum": 0 },
+            "dropped_count": { "type": "integer", "minimum": 0 },
+            "dropped_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+            "true_multimodal_encode": { "type": "boolean" },
+            "length_audit_backend": { "type": "string", "minLength": 1 },
+            "threshold_clean_basis": { "type": "string", "minLength": 1 },
+            "true_threshold_clean_certified": { "type": "boolean" }
+          }
         }
       }
     },

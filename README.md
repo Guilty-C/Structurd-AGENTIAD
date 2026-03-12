@@ -110,6 +110,7 @@ Trajectory reconstruction for SFT is now part of the local audited repo state.
 - Prompt 1.6 keeps canonical trajectories unchanged but compacts only the MS-Swift-facing text rendering (deduplicated tool-request prose, compact tool-response payloads) and emits a lightweight length-audit sidecar for max-length planning
 - Prompt 1.7 adds dual length audits (`proxy` and `true`) plus threshold-clean MS-Swift exports (`<=4096` and `<=8192`) with kept/dropped manifest summaries for remote smoke planning
 - Prompt 1.8 makes audit semantics explicit (`true` vs fallback-derived), enforces strict true-audit behavior, and writes a resolved remote surfaces artifact so remote commands do not rely on unresolved templates
+- Prompt 1.9 keeps threshold filtering true-audit-driven when real multimodal encode is available, and extends filtered manifests with dropped ratio, source-path lineage, offender summaries, and kept/dropped boundary lengths
 - `configs/sft_export_fixture.json` freezes the local fixture-backed SFT export definition
 - `configs/sft_export_remote_template.json` freezes the remote-only full export definition
 - `configs/ms_swift_sft_fixture.json` freezes the local MS-Swift adapter recipe

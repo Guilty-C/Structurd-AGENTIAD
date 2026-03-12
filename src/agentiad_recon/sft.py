@@ -877,9 +877,18 @@ def export_swift_dataset(
     true_lengths = {row["id"]: int(row["encoded_length"]) for row in true_length_audit["lengths"]}
     filtered_exports: list[dict[str, Any]] = []
     filtered_manifest_paths: dict[str, str] = {}
+    filtered_export_summary_by_threshold: dict[str, dict[str, Any]] = {}
+    total_record_count = len(swift_records)
     for threshold in (4096, 8192):
         kept_records = [record for record in swift_records if true_lengths[record["id"]] <= threshold]
-        dropped_rows = [row for row in true_length_audit["lengths"] if row["encoded_length"] > threshold]
+        dropped_rows = sorted(
+            [row for row in true_length_audit["lengths"] if row["encoded_length"] > threshold],
+            key=lambda row: row["encoded_length"],
+            reverse=True,
+        )
+        kept_lengths = [true_lengths[record["id"]] for record in kept_records]
+        dropped_count = len(dropped_rows)
+        dropped_ratio = (dropped_count / total_record_count) if total_record_count else 0.0
 
         filtered_dataset_path = output_directory / f"{stem}_le{threshold}.jsonl"
         filtered_dataset_path.write_text(
@@ -891,9 +900,12 @@ def export_swift_dataset(
             "threshold": threshold,
             "parent_dataset_path": str(swift_dataset_path.resolve()),
             "parent_dataset_sha256": sha256_file(swift_dataset_path),
+            "source_swift_dataset_path": str(swift_dataset_path.resolve()),
+            "source_true_audit_path": str(true_length_audit_path.resolve()),
             "kept_dataset_path": str(filtered_dataset_path.resolve()),
             "kept_count": len(kept_records),
-            "dropped_count": len(dropped_rows),
+            "dropped_count": dropped_count,
+            "dropped_ratio": dropped_ratio,
             "true_length_audit_path": str(true_length_audit_path.resolve()),
             "true_multimodal_encode": true_multimodal_encode,
             "length_audit_backend": length_audit_backend,
@@ -901,25 +913,26 @@ def export_swift_dataset(
             "strict_true_length_audit_requested": strict_true_length_audit,
             "strict_true_length_audit_passed": strict_passed,
             "true_threshold_clean_certified": true_multimodal_encode,
-            "dropped_top_offenders": sorted(
-                dropped_rows,
-                key=lambda row: row["encoded_length"],
-                reverse=True,
-            )[:10],
+            "top_dropped_offenders": dropped_rows[:10],
+            "max_kept_encoded_length": max(kept_lengths) if kept_lengths else None,
+            "min_dropped_encoded_length": min(row["encoded_length"] for row in dropped_rows) if dropped_rows else None,
         }
         filtered_manifest_path = output_directory / f"{stem}_le{threshold}.manifest.json"
         filtered_manifest_path.write_text(json.dumps(filtered_manifest, indent=2, sort_keys=True), encoding="utf-8")
-        filtered_exports.append(
-            {
-                "threshold": threshold,
-                "dataset_path": str(filtered_dataset_path.resolve()),
-                "manifest_path": str(filtered_manifest_path.resolve()),
-                "kept_count": len(kept_records),
-                "dropped_count": len(dropped_rows),
-                "threshold_clean_basis": threshold_clean_basis,
-                "true_threshold_clean_certified": true_multimodal_encode,
-            }
-        )
+        filtered_summary = {
+            "threshold": threshold,
+            "dataset_path": str(filtered_dataset_path.resolve()),
+            "manifest_path": str(filtered_manifest_path.resolve()),
+            "kept_count": len(kept_records),
+            "dropped_count": dropped_count,
+            "dropped_ratio": dropped_ratio,
+            "true_multimodal_encode": true_multimodal_encode,
+            "length_audit_backend": length_audit_backend,
+            "threshold_clean_basis": threshold_clean_basis,
+            "true_threshold_clean_certified": true_multimodal_encode,
+        }
+        filtered_exports.append(filtered_summary)
+        filtered_export_summary_by_threshold[str(threshold)] = filtered_summary
         filtered_manifest_paths[str(threshold)] = str(filtered_manifest_path.resolve())
 
     runtime_probe = swift_runtime_probe()
@@ -956,10 +969,11 @@ def export_swift_dataset(
             "strict_true_length_audit_passed": strict_passed,
         },
         "filtered_exports": filtered_exports,
+        "filtered_export_summary_by_threshold": filtered_export_summary_by_threshold,
         "runtime_probe": runtime_probe,
         "notes": [
             "This dataset is adapter-generated for later MS-Swift ownership.",
-            "Local Prompt 1.7 adds true-length audit plus threshold-clean filtered datasets.",
+            "Local Prompt 1.9 keeps threshold-clean export driven by true multimodal length audit when available.",
         ],
     }
     validate_payload(manifest, "sft_dataset_manifest.schema.json")
