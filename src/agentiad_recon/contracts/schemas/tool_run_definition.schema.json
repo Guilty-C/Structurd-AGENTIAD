@@ -40,12 +40,15 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["mock", "vllm"]
+          "enum": ["mock", "vllm", "transformers"]
         },
         "name": { "type": "string", "minLength": 1 },
         "policy": { "type": "string", "minLength": 1 },
         "runtime_owner": { "type": "string", "minLength": 1 }
       }
+    },
+    "runtime": {
+      "$ref": "baseline_run_definition.schema.json#/$defs/runtimeConfig"
     },
     "seeds": {
       "type": "array",

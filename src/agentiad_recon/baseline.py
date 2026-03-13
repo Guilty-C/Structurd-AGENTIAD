@@ -20,6 +20,7 @@ from agentiad_recon.backends import (
     InferenceBackend,
     MockInferenceBackend,
     MockToolAwareBackend,
+    TransformersVisionLanguageBackend,
     VLLMBackendAdapter,
 )
 from agentiad_recon.contracts import validate_payload
@@ -81,16 +82,146 @@ def load_run_definition(path: str | Path) -> dict[str, Any]:
     raise InferenceRunError(f"Unsupported run mode in config: {mode!r}")
 
 
-def _select_backend(config: dict[str, Any]) -> InferenceBackend:
+def _infer_checkpoint_provenance(adapter_checkpoint_path: str | None) -> dict[str, Any]:
+    """Infer checkpoint step/run-dir lineage from an adapter path when possible."""
+
+    if not adapter_checkpoint_path:
+        return {"checkpoint_step": None, "checkpoint_run_dir": None}
+
+    path = _resolve_path(adapter_checkpoint_path)
+    checkpoint_step = None
+    if path.name.startswith("checkpoint-"):
+        try:
+            checkpoint_step = int(path.name.split("-", 1)[1])
+        except ValueError:
+            checkpoint_step = None
+    checkpoint_run_dir = str(path.parent.resolve()) if path.parent != path else None
+    return {
+        "checkpoint_step": checkpoint_step,
+        "checkpoint_run_dir": checkpoint_run_dir,
+    }
+
+
+def _runtime_defaults() -> dict[str, Any]:
+    """Return deterministic runtime defaults for auditable eval runs."""
+
+    return {
+        "base_model_path": None,
+        "adapter_checkpoint_path": None,
+        "checkpoint_step": None,
+        "checkpoint_run_dir": None,
+        "local_files_only": True,
+        "trust_remote_code": True,
+        "dtype": "auto",
+        "device": "auto",
+        "generation": {
+            "max_new_tokens": 512,
+            "do_sample": False,
+            "temperature": 0.0,
+            "top_p": 1.0,
+        },
+    }
+
+
+def _runtime_config(
+    definition: dict[str, Any],
+    *,
+    dataset_root: str | Path | None,
+    runtime_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve runtime settings from config plus optional CLI overrides."""
+
+    config = _runtime_defaults()
+    config.update(definition.get("runtime", {}))
+    generation_overrides = dict(runtime_overrides.get("generation", {})) if runtime_overrides else {}
+    config["generation"] = dict(config["generation"])
+    config["generation"].update(generation_overrides)
+
+    for key in (
+        "base_model_path",
+        "adapter_checkpoint_path",
+        "checkpoint_step",
+        "checkpoint_run_dir",
+        "local_files_only",
+        "trust_remote_code",
+        "dtype",
+        "device",
+    ):
+        if runtime_overrides and key in runtime_overrides and runtime_overrides[key] is not None:
+            config[key] = runtime_overrides[key]
+
+    inferred = _infer_checkpoint_provenance(config["adapter_checkpoint_path"])
+    if config["checkpoint_step"] is None:
+        config["checkpoint_step"] = inferred["checkpoint_step"]
+    if config["checkpoint_run_dir"] is None:
+        config["checkpoint_run_dir"] = inferred["checkpoint_run_dir"]
+
+    resolved_dataset_root = _resolve_path(dataset_root or definition["sample_source"]["path"])
+    config["dataset_root"] = str(resolved_dataset_root)
+    config["tool_mode"] = definition["mode"]
+    config["inference_mode"] = definition["mode"]
+    config["runtime_backend_name"] = definition["backend"]["name"]
+    config["runtime_backend_type"] = definition["backend"]["type"]
+    config["runtime_owner"] = definition["backend"]["runtime_owner"]
+    return config
+
+
+def _resolved_runtime_provenance(
+    definition: dict[str, Any],
+    runtime_config: dict[str, Any],
+    backend: InferenceBackend,
+) -> dict[str, Any]:
+    """Merge requested runtime settings with backend-reported effective state."""
+
+    backend_runtime = backend.describe_runtime()
+    return {
+        "runtime_backend_name": definition["backend"]["name"],
+        "runtime_backend_type": definition["backend"]["type"],
+        "runtime_owner": definition["backend"]["runtime_owner"],
+        "policy": definition["backend"]["policy"],
+        "base_model_path": runtime_config["base_model_path"],
+        "adapter_checkpoint_path": runtime_config["adapter_checkpoint_path"],
+        "adapter_loaded": backend_runtime.get("adapter_loaded", False),
+        "checkpoint_step": runtime_config["checkpoint_step"],
+        "checkpoint_run_dir": runtime_config["checkpoint_run_dir"],
+        "dataset_root": runtime_config["dataset_root"],
+        "tool_mode": runtime_config["tool_mode"],
+        "inference_mode": runtime_config["inference_mode"],
+        "generation_config": dict(runtime_config["generation"]),
+        "local_files_only": runtime_config["local_files_only"],
+        "trust_remote_code": runtime_config["trust_remote_code"],
+        "dtype": runtime_config["dtype"],
+        "device": runtime_config["device"],
+    }
+
+
+def _select_backend(config: dict[str, Any], *, runtime_config: dict[str, Any] | None = None) -> InferenceBackend:
     """Instantiate the requested backend while keeping runtime ownership thin."""
 
     backend_type = config["type"]
     if backend_type == "mock":
         if config["policy"] == "fixture_scripted_non_tool_v1":
-            return MockInferenceBackend(backend_name=config["name"], policy=config["policy"])
-        return MockToolAwareBackend(backend_name=config["name"], policy=config["policy"])
+            return MockInferenceBackend(
+                backend_name=config["name"],
+                policy=config["policy"],
+                runtime_config=runtime_config,
+            )
+        return MockToolAwareBackend(
+            backend_name=config["name"],
+            policy=config["policy"],
+            runtime_config=runtime_config,
+        )
+    if backend_type == "transformers":
+        return TransformersVisionLanguageBackend(
+            backend_name=config["name"],
+            policy=config["policy"],
+            runtime_config=runtime_config,
+        )
     if backend_type == "vllm":
-        return VLLMBackendAdapter(backend_name=config["name"])
+        return VLLMBackendAdapter(
+            backend_name=config["name"],
+            runtime_config=runtime_config,
+        )
     raise InferenceRunError(f"Unsupported backend type: {backend_type}")
 
 
@@ -274,6 +405,7 @@ def _baseline_metadata(
     definition: dict[str, Any],
     config_path: str | Path,
     sample_source_path: Path,
+    runtime_provenance: dict[str, Any],
 ) -> dict[str, Any]:
     """Build reproducibility metadata for the baseline run family."""
 
@@ -292,8 +424,13 @@ def _baseline_metadata(
         },
         dataset_manifest_hash=dataset_manifest_hash,
         notes=[
-            "Prompt 1.3/1.4 local-only baseline run.",
-            "Mock backend outputs are deterministic smoke-validation artifacts, not real model inference.",
+            f"Canonical baseline run for mode={definition['mode']}.",
+            f"Backend type={runtime_provenance['runtime_backend_type']} policy={definition['backend']['policy']}.",
+            (
+                f"Adapter checkpoint loaded from {runtime_provenance['adapter_checkpoint_path']}."
+                if runtime_provenance["adapter_loaded"]
+                else "No adapter checkpoint was loaded for this run."
+            ),
         ],
     )
 
@@ -304,6 +441,7 @@ def _tool_metadata(
     config_path: str | Path,
     sample_source_path: Path,
     compare_config_path: str | Path,
+    runtime_provenance: dict[str, Any],
 ) -> dict[str, Any]:
     """Build reproducibility metadata for the tool-augmented run family."""
 
@@ -326,8 +464,13 @@ def _tool_metadata(
         },
         dataset_manifest_hash=dataset_manifest_hash,
         notes=[
-            "Prompt 1.4 local-only tool-augmented smoke run.",
-            "Scripted tool-aware backend outputs are deterministic smoke-validation artifacts, not real model inference.",
+            f"Canonical tool-augmented run for mode={definition['mode']}.",
+            f"Backend type={runtime_provenance['runtime_backend_type']} policy={definition['backend']['policy']}.",
+            (
+                f"Adapter checkpoint loaded from {runtime_provenance['adapter_checkpoint_path']}."
+                if runtime_provenance["adapter_loaded"]
+                else "No adapter checkpoint was loaded for this run."
+            ),
         ],
     )
 
@@ -338,6 +481,7 @@ def run_baseline(
     dataset_root: str | Path | None = None,
     artifact_root: str | Path | None = None,
     max_samples: int | None = None,
+    runtime_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the canonical non-tool baseline and write auditable artifacts."""
 
@@ -345,7 +489,12 @@ def run_baseline(
     if definition["mode"] != "no_tools":
         raise InferenceRunError("run_baseline requires a `mode=no_tools` config")
 
-    backend = _select_backend(definition["backend"])
+    runtime_config = _runtime_config(
+        definition,
+        dataset_root=dataset_root,
+        runtime_overrides=runtime_overrides,
+    )
+    backend = _select_backend(definition["backend"], runtime_config=runtime_config)
     samples = _load_samples(definition, dataset_root=dataset_root, max_samples=max_samples)
     root = _resolve_path(artifact_root or definition["artifacts"]["root"])
     directories = _artifact_dirs(definition, root)
@@ -363,7 +512,10 @@ def run_baseline(
                 messages=history,
                 stop_sequences=prompt_bundle.stop_sequences,
                 tool_mode="no_tools",
-                metadata={"tool_mode": "no_tools"},
+                metadata={
+                    "tool_mode": "no_tools",
+                    "sample_kind": sample["metadata"].get("dataset_kind", "unknown"),
+                },
             )
             response = backend.generate(request, sample=sample)
 
@@ -428,6 +580,11 @@ def run_baseline(
                 metadata={
                     "backend_metadata": response.metadata,
                     "sample_source_kind": sample["metadata"].get("dataset_kind"),
+                    "runtime_provenance": _resolved_runtime_provenance(
+                        definition,
+                        runtime_config,
+                        backend,
+                    ),
                 },
             )
             prediction_path = directories["predictions"] / f"seed_{seed}" / f"{sample_slug}.json"
@@ -437,6 +594,7 @@ def run_baseline(
 
         write_jsonl(directories["predictions"] / f"seed_{seed}.jsonl", seed_records)
 
+    runtime_provenance = _resolved_runtime_provenance(definition, runtime_config, backend)
     metrics_report = build_metrics_report(
         run_id=definition["run_id"],
         tool_mode="no_tools",
@@ -445,6 +603,7 @@ def run_baseline(
         backend_name=definition["backend"]["name"],
         prediction_records=prediction_records,
         seeds=definition["seeds"],
+        runtime_provenance=runtime_provenance,
     )
     metrics_report_path = directories["metrics"] / "metrics_report.json"
     per_seed_metrics_path = directories["metrics"] / "per_seed_metrics.json"
@@ -460,6 +619,7 @@ def run_baseline(
         definition=definition,
         config_path=config_path,
         sample_source_path=sample_source_path,
+        runtime_provenance=runtime_provenance,
     )
     run_metadata_path = directories["root"] / "run_metadata.json"
     write_json(run_metadata_path, run_metadata)
@@ -478,6 +638,7 @@ def run_baseline(
         },
         seeds=definition["seeds"],
         prediction_records=prediction_records,
+        runtime_provenance=runtime_provenance,
         artifact_paths={
             "predictions_dir": str(directories["predictions"].resolve()),
             "traces_dir": str(directories["traces"].resolve()),
@@ -506,9 +667,14 @@ def run_baseline(
             "run_metadata": sha256_file(run_metadata_path),
         },
         "execution_boundary": definition["execution_boundary"],
+        "run_provenance": runtime_provenance,
         "notes": [
             "Non-tool baseline summary manifest.",
-            "Tools remained disabled for the entire run.",
+            (
+                "This run used the scripted mock backend for local smoke validation."
+                if definition["backend"]["type"] == "mock"
+                else "This manifest records a real evaluation-capable backend configuration."
+            ),
         ],
     }
     validate_payload(run_manifest, "artifact_manifest.schema.json")
@@ -522,6 +688,7 @@ def run_baseline(
         "run_metadata_path": str(run_metadata_path.resolve()),
         "run_manifest_path": str(run_manifest_path.resolve()),
         "summary_path": str(summary_path.resolve()),
+        "runtime_provenance": runtime_provenance,
     }
 
 
@@ -540,6 +707,7 @@ def _tool_loop_sample(
     *,
     definition: dict[str, Any],
     backend: InferenceBackend,
+    runtime_config: dict[str, Any],
     sample: dict[str, Any],
     sample_pool: list[dict[str, Any]],
     seed: int,
@@ -565,7 +733,11 @@ def _tool_loop_sample(
             messages=history,
             stop_sequences=prompt_bundle.stop_sequences,
             tool_mode=definition["mode"],
-            metadata={"tool_mode": definition["mode"], "turn_index": turn_index},
+            metadata={
+                "tool_mode": definition["mode"],
+                "turn_index": turn_index,
+                "sample_kind": sample["metadata"].get("dataset_kind", "unknown"),
+            },
         )
         response = backend.generate(request, sample=sample)
         raw_output_path = _raw_output_path(
@@ -695,6 +867,11 @@ def _tool_loop_sample(
             "sample_source_kind": sample["metadata"].get("dataset_kind"),
             "tool_trace_count": len(tool_traces),
             "tool_names": [trace["tool_name"] for trace in tool_traces],
+            "runtime_provenance": _resolved_runtime_provenance(
+                definition,
+                runtime_config,
+                backend,
+            ),
         },
     )
     prediction_path = directories["predictions"] / f"seed_{seed}" / f"{sample_slug}.json"
@@ -708,6 +885,7 @@ def run_tool_augmented(
     dataset_root: str | Path | None = None,
     artifact_root: str | Path | None = None,
     max_samples: int | None = None,
+    runtime_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the canonical tool-enabled inference path for `pz_only` or `pz_cr`."""
 
@@ -715,7 +893,12 @@ def run_tool_augmented(
     if definition["mode"] not in {"pz_only", "pz_cr"}:
         raise InferenceRunError("run_tool_augmented requires a `pz_only` or `pz_cr` config")
 
-    backend = _select_backend(definition["backend"])
+    runtime_config = _runtime_config(
+        definition,
+        dataset_root=dataset_root,
+        runtime_overrides=runtime_overrides,
+    )
+    backend = _select_backend(definition["backend"], runtime_config=runtime_config)
     samples = _load_samples(definition, dataset_root=dataset_root, max_samples=max_samples)
     root = _resolve_path(artifact_root or definition["artifacts"]["root"])
     directories = _artifact_dirs(definition, root)
@@ -727,6 +910,7 @@ def run_tool_augmented(
             record, _trace_payload = _tool_loop_sample(
                 definition=definition,
                 backend=backend,
+                runtime_config=runtime_config,
                 sample=sample,
                 sample_pool=samples,
                 seed=seed,
@@ -736,6 +920,7 @@ def run_tool_augmented(
             prediction_records.append(record)
         write_jsonl(directories["predictions"] / f"seed_{seed}.jsonl", seed_records)
 
+    runtime_provenance = _resolved_runtime_provenance(definition, runtime_config, backend)
     metrics_report = build_metrics_report(
         run_id=definition["run_id"],
         tool_mode=definition["mode"],
@@ -744,6 +929,7 @@ def run_tool_augmented(
         backend_name=definition["backend"]["name"],
         prediction_records=prediction_records,
         seeds=definition["seeds"],
+        runtime_provenance=runtime_provenance,
     )
     metrics_report_path = directories["metrics"] / "metrics_report.json"
     per_seed_metrics_path = directories["metrics"] / "per_seed_metrics.json"
@@ -760,6 +946,7 @@ def run_tool_augmented(
         dataset_root=dataset_root,
         artifact_root=compare_artifact_root,
         max_samples=max_samples,
+        runtime_overrides=runtime_overrides,
     )
     delta_report = build_delta_report(
         tool_run_id=definition["run_id"],
@@ -781,6 +968,7 @@ def run_tool_augmented(
         config_path=config_path,
         sample_source_path=sample_source_path,
         compare_config_path=_resolve_path(definition["compare_to"]["config_path"]),
+        runtime_provenance=runtime_provenance,
     )
     run_metadata_path = directories["root"] / "run_metadata.json"
     write_json(run_metadata_path, run_metadata)
@@ -799,6 +987,7 @@ def run_tool_augmented(
         },
         seeds=definition["seeds"],
         prediction_records=prediction_records,
+        runtime_provenance=runtime_provenance,
         artifact_paths={
             "predictions_dir": str(directories["predictions"].resolve()),
             "traces_dir": str(directories["traces"].resolve()),
@@ -829,9 +1018,14 @@ def run_tool_augmented(
             "delta_report": sha256_file(delta_report_path),
         },
         "execution_boundary": definition["execution_boundary"],
+        "run_provenance": runtime_provenance,
         "notes": [
             "Tool-augmented inference summary manifest.",
-            "This run is local scripted smoke validation, not real model execution.",
+            (
+                "This run used the scripted mock backend for local smoke validation."
+                if definition["backend"]["type"] == "mock"
+                else "This manifest records a real evaluation-capable backend configuration."
+            ),
         ],
     }
     validate_payload(run_manifest, "artifact_manifest.schema.json")
@@ -847,6 +1041,7 @@ def run_tool_augmented(
         "run_metadata_path": str(run_metadata_path.resolve()),
         "run_manifest_path": str(run_manifest_path.resolve()),
         "summary_path": str(summary_path.resolve()),
+        "runtime_provenance": runtime_provenance,
     }
 
 
@@ -856,6 +1051,7 @@ def run_from_config(
     dataset_root: str | Path | None = None,
     artifact_root: str | Path | None = None,
     max_samples: int | None = None,
+    runtime_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Dispatch the canonical inference runner from one externalized config."""
 
@@ -866,13 +1062,48 @@ def run_from_config(
             dataset_root=dataset_root,
             artifact_root=artifact_root,
             max_samples=max_samples,
+            runtime_overrides=runtime_overrides,
         )
     return run_tool_augmented(
         config_path=config_path,
         dataset_root=dataset_root,
         artifact_root=artifact_root,
         max_samples=max_samples,
+        runtime_overrides=runtime_overrides,
     )
+
+
+def dry_run_from_config(
+    *,
+    config_path: str | Path,
+    dataset_root: str | Path | None = None,
+    artifact_root: str | Path | None = None,
+    max_samples: int | None = None,
+    runtime_overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate the unified baseline surface without loading a model."""
+
+    definition = load_run_definition(config_path)
+    runtime_config = _runtime_config(
+        definition,
+        dataset_root=dataset_root,
+        runtime_overrides=runtime_overrides,
+    )
+    backend = _select_backend(definition["backend"], runtime_config=runtime_config)
+    try:
+        sample_count = len(_load_samples(definition, dataset_root=dataset_root, max_samples=max_samples))
+    except InferenceRunError as exc:
+        if "No canonical samples were selected" not in str(exc):
+            raise
+        sample_count = 0
+    artifact_root_path = _resolve_path(artifact_root or definition["artifacts"]["root"])
+    return {
+        "run_id": definition["run_id"],
+        "mode": definition["mode"],
+        "sample_count": sample_count,
+        "artifact_root": str(artifact_root_path),
+        "runtime_provenance": _resolved_runtime_provenance(definition, runtime_config, backend),
+    }
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -885,6 +1116,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-root", help="Optional dataset root override.")
     parser.add_argument("--artifact-root", help="Optional artifact root override.")
     parser.add_argument("--max-samples", type=int, help="Optional sample limit override.")
+    parser.add_argument("--base-model-path", help="Optional base model path override.")
+    parser.add_argument("--adapter-checkpoint-path", help="Optional LoRA adapter checkpoint override.")
+    parser.add_argument("--checkpoint-step", type=int, help="Optional checkpoint step override.")
+    parser.add_argument("--checkpoint-run-dir", help="Optional checkpoint run directory override.")
+    parser.add_argument("--device", help="Optional device override, for example `auto`, `cuda`, or `cpu`.")
+    parser.add_argument("--dtype", help="Optional dtype override, for example `auto`, `bfloat16`, or `float16`.")
+    parser.add_argument("--local-files-only", dest="local_files_only", action="store_true")
+    parser.add_argument("--no-local-files-only", dest="local_files_only", action="store_false")
+    parser.set_defaults(local_files_only=None)
+    parser.add_argument("--trust-remote-code", dest="trust_remote_code", action="store_true")
+    parser.add_argument("--no-trust-remote-code", dest="trust_remote_code", action="store_false")
+    parser.set_defaults(trust_remote_code=None)
+    parser.add_argument("--max-new-tokens", type=int, help="Optional generation max_new_tokens override.")
+    parser.add_argument("--temperature", type=float, help="Optional generation temperature override.")
+    parser.add_argument("--top-p", type=float, help="Optional generation top_p override.")
+    parser.add_argument("--do-sample", dest="do_sample", action="store_true")
+    parser.add_argument("--no-do-sample", dest="do_sample", action="store_false")
+    parser.set_defaults(do_sample=None)
+    parser.add_argument("--dry-run", action="store_true", help="Validate config/runtime surfaces without inference.")
     return parser
 
 
@@ -892,15 +1142,48 @@ def main() -> int:
     """Execute the inference CLI and print a compact success summary."""
 
     args = _build_parser().parse_args()
+    runtime_overrides = {
+        "base_model_path": args.base_model_path,
+        "adapter_checkpoint_path": args.adapter_checkpoint_path,
+        "checkpoint_step": args.checkpoint_step,
+        "checkpoint_run_dir": args.checkpoint_run_dir,
+        "device": args.device,
+        "dtype": args.dtype,
+        "local_files_only": args.local_files_only,
+        "trust_remote_code": args.trust_remote_code,
+        "generation": {
+            key: value
+            for key, value in {
+                "max_new_tokens": args.max_new_tokens,
+                "temperature": args.temperature,
+                "top_p": args.top_p,
+                "do_sample": args.do_sample,
+            }.items()
+            if value is not None
+        },
+    }
+    if args.dry_run:
+        result = dry_run_from_config(
+            config_path=args.config,
+            dataset_root=args.dataset_root,
+            artifact_root=args.artifact_root,
+            max_samples=args.max_samples,
+            runtime_overrides=runtime_overrides,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
     result = run_from_config(
         config_path=args.config,
         dataset_root=args.dataset_root,
         artifact_root=args.artifact_root,
         max_samples=args.max_samples,
+        runtime_overrides=runtime_overrides,
     )
     payload = {
         "run_manifest_path": result["run_manifest_path"],
         "summary_path": result["summary_path"],
+        "runtime_provenance": result["runtime_provenance"],
     }
     if "delta_report_path" in result:
         payload["delta_report_path"] = result["delta_report_path"]

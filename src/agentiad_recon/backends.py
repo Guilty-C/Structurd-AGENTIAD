@@ -9,10 +9,14 @@ this module.
 
 from __future__ import annotations
 
+import importlib
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from agentiad_recon.prompting import render_answer_block
 
@@ -48,9 +52,43 @@ class InferenceBackend(ABC):
 
     backend_name: str
 
+    def describe_runtime(self) -> dict[str, Any]:
+        """Return audit metadata about the backend runtime configuration."""
+
+        return {}
+
     @abstractmethod
     def generate(self, request: BackendRequest, *, sample: dict[str, Any]) -> BackendResponse:
         """Generate one raw model response for a canonical sample."""
+
+
+def _default_generation_config() -> dict[str, Any]:
+    """Return deterministic generation defaults for auditable eval runs."""
+
+    return {
+        "max_new_tokens": 512,
+        "do_sample": False,
+        "temperature": 0.0,
+        "top_p": 1.0,
+    }
+
+
+def _normalize_runtime_config(runtime_config: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge optional runtime config onto stable backend defaults."""
+
+    config = dict(runtime_config or {})
+    generation = dict(_default_generation_config())
+    generation.update(config.get("generation", {}))
+    config["generation"] = generation
+    config.setdefault("base_model_path", None)
+    config.setdefault("adapter_checkpoint_path", None)
+    config.setdefault("checkpoint_step", None)
+    config.setdefault("checkpoint_run_dir", None)
+    config.setdefault("local_files_only", True)
+    config.setdefault("trust_remote_code", True)
+    config.setdefault("dtype", "auto")
+    config.setdefault("device", "auto")
+    return config
 
 
 class MockInferenceBackend(InferenceBackend):
@@ -61,9 +99,29 @@ class MockInferenceBackend(InferenceBackend):
     ground truth only to exercise the parsing and evaluation plumbing.
     """
 
-    def __init__(self, *, backend_name: str, policy: str) -> None:
+    def __init__(self, *, backend_name: str, policy: str, runtime_config: dict[str, Any] | None = None) -> None:
         self.backend_name = backend_name
         self.policy = policy
+        self.runtime_config = _normalize_runtime_config(runtime_config)
+
+    def describe_runtime(self) -> dict[str, Any]:
+        """Expose the requested runtime surface without claiming real loading."""
+
+        return {
+            "backend_type": "mock",
+            "runtime_owner": "mock_fixture_only",
+            "policy": self.policy,
+            "base_model_path": self.runtime_config["base_model_path"],
+            "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
+            "adapter_loaded": False,
+            "checkpoint_step": self.runtime_config["checkpoint_step"],
+            "checkpoint_run_dir": self.runtime_config["checkpoint_run_dir"],
+            "generation_config": dict(self.runtime_config["generation"]),
+            "local_files_only": self.runtime_config["local_files_only"],
+            "trust_remote_code": self.runtime_config["trust_remote_code"],
+            "dtype": self.runtime_config["dtype"],
+            "device": self.runtime_config["device"],
+        }
 
     def _fixture_scripted_output(self, request: BackendRequest, sample: dict[str, Any]) -> str:
         """Create deterministic baseline outputs, including one malformed branch."""
@@ -130,9 +188,29 @@ class MockToolAwareBackend(InferenceBackend):
     trace storage, and delta-vs-baseline artifacts without any heavy inference.
     """
 
-    def __init__(self, *, backend_name: str, policy: str) -> None:
+    def __init__(self, *, backend_name: str, policy: str, runtime_config: dict[str, Any] | None = None) -> None:
         self.backend_name = backend_name
         self.policy = policy
+        self.runtime_config = _normalize_runtime_config(runtime_config)
+
+    def describe_runtime(self) -> dict[str, Any]:
+        """Expose the requested runtime surface without claiming real loading."""
+
+        return {
+            "backend_type": "mock",
+            "runtime_owner": "mock_fixture_only",
+            "policy": self.policy,
+            "base_model_path": self.runtime_config["base_model_path"],
+            "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
+            "adapter_loaded": False,
+            "checkpoint_step": self.runtime_config["checkpoint_step"],
+            "checkpoint_run_dir": self.runtime_config["checkpoint_run_dir"],
+            "generation_config": dict(self.runtime_config["generation"]),
+            "local_files_only": self.runtime_config["local_files_only"],
+            "trust_remote_code": self.runtime_config["trust_remote_code"],
+            "dtype": self.runtime_config["dtype"],
+            "device": self.runtime_config["device"],
+        }
 
     def _tool_result_names(self, request: BackendRequest) -> list[str]:
         """Inspect the history and recover the ordered tool-result names."""
@@ -248,9 +326,35 @@ class VLLMBackendAdapter(InferenceBackend):
     does not execute it locally.
     """
 
-    def __init__(self, *, backend_name: str, model: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        backend_name: str,
+        model: str | None = None,
+        runtime_config: dict[str, Any] | None = None,
+    ) -> None:
         self.backend_name = backend_name
         self.model = model
+        self.runtime_config = _normalize_runtime_config(runtime_config)
+
+    def describe_runtime(self) -> dict[str, Any]:
+        """Report the requested vLLM runtime surface honestly."""
+
+        return {
+            "backend_type": "vllm",
+            "runtime_owner": "maintained_runtime_skeleton",
+            "policy": "skeleton",
+            "base_model_path": self.runtime_config["base_model_path"],
+            "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
+            "adapter_loaded": False,
+            "checkpoint_step": self.runtime_config["checkpoint_step"],
+            "checkpoint_run_dir": self.runtime_config["checkpoint_run_dir"],
+            "generation_config": dict(self.runtime_config["generation"]),
+            "local_files_only": self.runtime_config["local_files_only"],
+            "trust_remote_code": self.runtime_config["trust_remote_code"],
+            "dtype": self.runtime_config["dtype"],
+            "device": self.runtime_config["device"],
+        }
 
     def prepare_payload(self, request: BackendRequest) -> dict[str, Any]:
         """Translate the canonical request into a future vLLM request payload."""
@@ -269,4 +373,246 @@ class VLLMBackendAdapter(InferenceBackend):
         raise BackendError(
             "The vLLM backend adapter is a maintained-runtime skeleton only. "
             "Prompt 1.4 remains local-only and should use the scripted mock backends."
+        )
+
+
+class TransformersVisionLanguageBackend(InferenceBackend):
+    """Minimal maintained-runtime adapter for local-path transformers + PEFT eval."""
+
+    def __init__(
+        self,
+        *,
+        backend_name: str,
+        policy: str,
+        runtime_config: dict[str, Any] | None = None,
+    ) -> None:
+        self.backend_name = backend_name
+        self.policy = policy
+        self.runtime_config = _normalize_runtime_config(runtime_config)
+        self._processor: Any | None = None
+        self._model: Any | None = None
+        self._torch: Any | None = None
+        self._adapter_loaded = False
+        self._model_class_name: str | None = None
+
+    def describe_runtime(self) -> dict[str, Any]:
+        """Return the effective runtime state for audit artifacts."""
+
+        return {
+            "backend_type": "transformers",
+            "runtime_owner": "transformers_peft_runtime",
+            "policy": self.policy,
+            "base_model_path": self.runtime_config["base_model_path"],
+            "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
+            "adapter_loaded": self._adapter_loaded,
+            "checkpoint_step": self.runtime_config["checkpoint_step"],
+            "checkpoint_run_dir": self.runtime_config["checkpoint_run_dir"],
+            "generation_config": dict(self.runtime_config["generation"]),
+            "local_files_only": self.runtime_config["local_files_only"],
+            "trust_remote_code": self.runtime_config["trust_remote_code"],
+            "dtype": self.runtime_config["dtype"],
+            "device": self.runtime_config["device"],
+            "model_class_name": self._model_class_name,
+        }
+
+    def _resolve_torch_dtype(self, torch_module: Any) -> Any:
+        """Translate string dtype settings into torch dtypes when possible."""
+
+        dtype_name = self.runtime_config["dtype"]
+        if dtype_name in {None, "", "auto"}:
+            return getattr(torch_module, "float16", None) if self.runtime_config["device"] == "cuda" else "auto"
+        return getattr(torch_module, dtype_name)
+
+    def _candidate_model_classes(self, transformers_module: Any) -> list[Any]:
+        """Return plausible HF model classes for multimodal chat generation."""
+
+        candidates = []
+        for name in (
+            "Qwen2_5_VLForConditionalGeneration",
+            "AutoModelForImageTextToText",
+            "AutoModelForVision2Seq",
+            "AutoModelForCausalLM",
+        ):
+            model_class = getattr(transformers_module, name, None)
+            if model_class is not None:
+                candidates.append(model_class)
+        return candidates
+
+    def _load_model(self) -> None:
+        """Load the processor and model, then optionally attach a PEFT adapter."""
+
+        if self._model is not None and self._processor is not None:
+            return
+
+        base_model_path = self.runtime_config["base_model_path"]
+        if not base_model_path:
+            raise BackendError("transformers backend requires a base_model_path")
+
+        try:
+            transformers_module = importlib.import_module("transformers")
+            torch_module = importlib.import_module("torch")
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"Failed to import transformers runtime dependencies: {exc}") from exc
+
+        self._torch = torch_module
+        processor_class = getattr(transformers_module, "AutoProcessor", None)
+        if processor_class is None:
+            raise BackendError("transformers.AutoProcessor is unavailable in the local runtime")
+
+        processor_kwargs = {
+            "trust_remote_code": self.runtime_config["trust_remote_code"],
+            "local_files_only": self.runtime_config["local_files_only"],
+        }
+        self._processor = processor_class.from_pretrained(base_model_path, **processor_kwargs)
+
+        model_kwargs = dict(processor_kwargs)
+        torch_dtype = self._resolve_torch_dtype(torch_module)
+        if torch_dtype != "auto":
+            model_kwargs["torch_dtype"] = torch_dtype
+        device = self.runtime_config["device"]
+        if device == "auto":
+            model_kwargs["device_map"] = "auto"
+
+        last_error: Exception | None = None
+        for model_class in self._candidate_model_classes(transformers_module):
+            try:
+                self._model = model_class.from_pretrained(base_model_path, **model_kwargs)
+                self._model_class_name = model_class.__name__
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+        if self._model is None:
+            raise BackendError(f"Failed to load model from {base_model_path}: {last_error}") from last_error
+
+        adapter_path = self.runtime_config["adapter_checkpoint_path"]
+        if adapter_path:
+            try:
+                peft_module = importlib.import_module("peft")
+                peft_model_class = getattr(peft_module, "PeftModel")
+                self._model = peft_model_class.from_pretrained(
+                    self._model,
+                    adapter_path,
+                    local_files_only=self.runtime_config["local_files_only"],
+                    is_trainable=False,
+                )
+                self._adapter_loaded = True
+            except Exception as exc:  # noqa: BLE001
+                raise BackendError(f"Failed to load PEFT adapter from {adapter_path}: {exc}") from exc
+
+        if device != "auto" and hasattr(self._model, "to"):
+            self._model = self._model.to(device)
+        if hasattr(self._model, "eval"):
+            self._model.eval()
+
+    def _message_text(self, message: dict[str, Any]) -> str:
+        """Map canonical history messages to chat-template text payloads."""
+
+        content = message.get("content", "")
+        if message.get("role") != "tool":
+            return content
+
+        tool_name = message.get("tool_name") or "tool"
+        call_id = message.get("call_id") or "unknown_call"
+        return f"Tool result from {tool_name} ({call_id}):\n{content}"
+
+    def _render_chat_messages(self, request: BackendRequest) -> tuple[list[dict[str, Any]], list[Any]]:
+        """Convert canonical messages plus image refs into processor chat blocks."""
+
+        chat_messages: list[dict[str, Any]] = []
+        opened_images: list[Any] = []
+        for message in request.messages:
+            role = message["role"]
+            if role == "tool":
+                role = "user"
+
+            blocks: list[dict[str, Any]] = []
+            text = self._message_text(message)
+            if text:
+                blocks.append({"type": "text", "text": text})
+
+            for image_ref in message.get("image_refs", []):
+                image = Image.open(Path(image_ref)).convert("RGB")
+                opened_images.append(image)
+                blocks.append({"type": "image", "image": image})
+
+            if not blocks:
+                blocks.append({"type": "text", "text": ""})
+            chat_messages.append({"role": role, "content": blocks})
+        return chat_messages, opened_images
+
+    def _prepare_inputs(self, request: BackendRequest) -> tuple[Any, list[Any]]:
+        """Apply the chat template and prepare one generation batch."""
+
+        if self._processor is None:
+            raise BackendError("Processor is unavailable before input preparation")
+
+        chat_messages, opened_images = self._render_chat_messages(request)
+        rendered = self._processor.apply_chat_template(
+            chat_messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        processor_kwargs = {
+            "text": [rendered],
+            "return_tensors": "pt",
+        }
+        if opened_images:
+            processor_kwargs["images"] = opened_images
+        encoded = self._processor(**processor_kwargs)
+        device = self.runtime_config["device"]
+        if device != "auto" and hasattr(encoded, "to"):
+            encoded = encoded.to(device)
+        return encoded, opened_images
+
+    def _truncate_at_stop_sequences(self, text: str, stop_sequences: list[str]) -> str:
+        """Trim decoded text at the earliest requested stop sequence when present."""
+
+        stop_positions = [
+            (text.find(sequence), len(sequence))
+            for sequence in stop_sequences
+            if sequence and text.find(sequence) >= 0
+        ]
+        if not stop_positions:
+            return text.strip()
+        end_index = min(position + length for position, length in stop_positions)
+        return text[:end_index].strip()
+
+    def generate(self, request: BackendRequest, *, sample: dict[str, Any]) -> BackendResponse:
+        """Generate one real response from a local-path transformers runtime."""
+
+        del sample  # The runtime consumes canonical request messages only.
+        self._load_model()
+        encoded_inputs, opened_images = self._prepare_inputs(request)
+        try:
+            generation_config = dict(self.runtime_config["generation"])
+            if not generation_config.get("do_sample", False):
+                generation_config.pop("temperature", None)
+                generation_config.pop("top_p", None)
+            output_ids = self._model.generate(**encoded_inputs, **generation_config)
+            prompt_length = encoded_inputs["input_ids"].shape[-1]
+            generated_ids = output_ids[:, prompt_length:]
+            decoded = self._processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+        except Exception as exc:  # noqa: BLE001
+            raise BackendError(f"transformers generation failed: {exc}") from exc
+        finally:
+            for image in opened_images:
+                image.close()
+
+        return BackendResponse(
+            backend_name=self.backend_name,
+            raw_output=self._truncate_at_stop_sequences(decoded, request.stop_sequences),
+            metadata={
+                "policy": self.policy,
+                "runtime_owner": "transformers_peft_runtime",
+                "sample_kind": request.metadata.get("sample_kind", "unknown"),
+                "tool_mode": request.tool_mode,
+                "base_model_path": self.runtime_config["base_model_path"],
+                "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
+                "adapter_loaded": self._adapter_loaded,
+                "generation_config": dict(self.runtime_config["generation"]),
+            },
         )

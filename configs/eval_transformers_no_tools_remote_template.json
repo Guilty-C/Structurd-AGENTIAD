@@ -1,0 +1,51 @@
+{
+  "run_id": "prompt_2_0_transformers_no_tools_remote",
+  "mode": "no_tools",
+  "prompt_version": "agentiad_baseline_prompt_v1_3",
+  "parser_version": "agentiad_final_answer_parser_v1_3",
+  "execution_boundary": "remote",
+  "sample_source": {
+    "kind": "real",
+    "path": "/data2/lrrelevant/datasets/MMAD/canonical_sources",
+    "source_name": "canonical_sources",
+    "splits": ["test"],
+    "max_samples": null
+  },
+  "backend": {
+    "type": "transformers",
+    "name": "transformers_qwen25_vl_eval_v1",
+    "policy": "hf_chat_vl_local_paths_v1",
+    "runtime_owner": "transformers_peft_runtime"
+  },
+  "runtime": {
+    "base_model_path": "/data2/lrrelevant/models/Qwen2.5-VL-3B-Instruct",
+    "adapter_checkpoint_path": null,
+    "local_files_only": true,
+    "trust_remote_code": true,
+    "dtype": "auto",
+    "device": "auto",
+    "generation": {
+      "max_new_tokens": 512,
+      "do_sample": false,
+      "temperature": 0.0,
+      "top_p": 1.0
+    }
+  },
+  "seeds": [0],
+  "artifacts": {
+    "root": "dist/outputs/prompt_2_0_transformers_no_tools_remote",
+    "raw_outputs": "raw_outputs",
+    "traces": "traces",
+    "predictions": "predictions",
+    "metrics": "metrics"
+  },
+  "remote_expectations": [
+    "Run through python -m agentiad_recon.baseline so the existing baseline entrypoint remains authoritative.",
+    "Point base_model_path at a local model directory and adapter_checkpoint_path at an optional local LoRA checkpoint.",
+    "Keep generation deterministic and auditable."
+  ],
+  "notes": [
+    "Prompt 2.0 remote template for base-only or optional-adapter no-tool evaluation.",
+    "This config is intended for real MMAD evaluation, not local smoke validation."
+  ]
+}

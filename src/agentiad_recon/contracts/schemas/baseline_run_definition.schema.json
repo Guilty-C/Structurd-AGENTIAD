@@ -75,7 +75,7 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["mock", "vllm"]
+          "enum": ["mock", "vllm", "transformers"]
         },
         "name": {
           "type": "string",
@@ -90,6 +90,9 @@
           "minLength": 1
         }
       }
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtimeConfig"
     },
     "seeds": {
       "type": "array",
@@ -121,6 +124,66 @@
       "type": "array",
       "items": {
         "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "runtimeConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base_model_path": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "adapter_checkpoint_path": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "checkpoint_step": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "checkpoint_run_dir": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "local_files_only": {
+          "type": "boolean"
+        },
+        "trust_remote_code": {
+          "type": "boolean"
+        },
+        "dtype": {
+          "type": "string",
+          "minLength": 1
+        },
+        "device": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_new_tokens": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "do_sample": {
+              "type": "boolean"
+            },
+            "temperature": {
+              "type": "number",
+              "minimum": 0
+            },
+            "top_p": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
       }
     }
   }

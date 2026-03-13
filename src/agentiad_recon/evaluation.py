@@ -181,6 +181,7 @@ def build_metrics_report(
     backend_name: str,
     prediction_records: list[dict[str, Any]],
     seeds: list[int],
+    runtime_provenance: dict[str, Any],
 ) -> dict[str, Any]:
     """Aggregate per-seed, per-class, and mean/std inference metrics."""
 
@@ -227,6 +228,12 @@ def build_metrics_report(
         for tool in TOOL_NAMES
     }
 
+    sample_count = len(prediction_records)
+    failed_count = sum(
+        1
+        for record in prediction_records
+        if not record["parser_valid"] or not record["schema_valid"] or record["prediction"] is None
+    )
     report = {
         "run_id": run_id,
         "tool_mode": tool_mode,
@@ -234,6 +241,10 @@ def build_metrics_report(
         "parser_version": parser_version,
         "backend_name": backend_name,
         "seeds": seeds,
+        "sample_count": sample_count,
+        "evaluated_count": sample_count - failed_count,
+        "failed_count": failed_count,
+        "runtime_provenance": runtime_provenance,
         "per_seed_metrics": per_seed_metrics,
         "per_class_metrics": per_class_metrics,
         "aggregate_metrics": aggregate_metrics,
@@ -267,6 +278,7 @@ def build_run_summary(
     sample_source: dict[str, Any],
     seeds: list[int],
     prediction_records: list[dict[str, Any]],
+    runtime_provenance: dict[str, Any],
     artifact_paths: dict[str, str],
     notes: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -275,6 +287,11 @@ def build_run_summary(
     parser_valid = sum(1 for record in prediction_records if record["parser_valid"])
     schema_valid = sum(1 for record in prediction_records if record["schema_valid"])
     sample_count = len(prediction_records)
+    failed_count = sum(
+        1
+        for record in prediction_records
+        if not record["parser_valid"] or not record["schema_valid"] or record["prediction"] is None
+    )
     summary = {
         "run_id": run_id,
         "tool_mode": tool_mode,
@@ -285,6 +302,8 @@ def build_run_summary(
         "sample_source": sample_source,
         "seeds": seeds,
         "sample_count": sample_count,
+        "evaluated_count": sample_count - failed_count,
+        "failed_count": failed_count,
         "parser_validity": {
             "valid": parser_valid,
             "invalid": sample_count - parser_valid,
@@ -293,6 +312,7 @@ def build_run_summary(
             "valid": schema_valid,
             "invalid": sample_count - schema_valid,
         },
+        "runtime_provenance": runtime_provenance,
         "tool_usage_summary": summarize_tool_usage(prediction_records),
         "artifact_paths": artifact_paths,
         "notes": notes or [],

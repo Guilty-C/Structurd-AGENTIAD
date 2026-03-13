@@ -51,6 +51,64 @@
       "type": "string",
       "enum": ["local", "remote"]
     },
+    "run_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_backend_name",
+        "runtime_backend_type",
+        "runtime_owner",
+        "policy",
+        "base_model_path",
+        "adapter_checkpoint_path",
+        "adapter_loaded",
+        "checkpoint_step",
+        "checkpoint_run_dir",
+        "dataset_root",
+        "tool_mode",
+        "inference_mode",
+        "generation_config",
+        "local_files_only",
+        "trust_remote_code",
+        "dtype",
+        "device"
+      ],
+      "properties": {
+        "runtime_backend_name": { "type": "string", "minLength": 1 },
+        "runtime_backend_type": { "type": "string", "minLength": 1 },
+        "runtime_owner": { "type": "string", "minLength": 1 },
+        "policy": { "type": "string", "minLength": 1 },
+        "base_model_path": { "type": ["string", "null"] },
+        "adapter_checkpoint_path": { "type": ["string", "null"] },
+        "adapter_loaded": { "type": "boolean" },
+        "checkpoint_step": { "type": ["integer", "null"], "minimum": 0 },
+        "checkpoint_run_dir": { "type": ["string", "null"] },
+        "dataset_root": { "type": "string", "minLength": 1 },
+        "tool_mode": {
+          "type": "string",
+          "enum": ["no_tools", "pz_only", "pz_cr"]
+        },
+        "inference_mode": {
+          "type": "string",
+          "enum": ["no_tools", "pz_only", "pz_cr"]
+        },
+        "generation_config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_new_tokens", "do_sample", "temperature", "top_p"],
+          "properties": {
+            "max_new_tokens": { "type": "integer", "minimum": 1 },
+            "do_sample": { "type": "boolean" },
+            "temperature": { "type": "number", "minimum": 0 },
+            "top_p": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        "local_files_only": { "type": "boolean" },
+        "trust_remote_code": { "type": "boolean" },
+        "dtype": { "type": "string", "minLength": 1 },
+        "device": { "type": "string", "minLength": 1 }
+      }
+    },
     "notes": {
       "type": "array",
       "items": {

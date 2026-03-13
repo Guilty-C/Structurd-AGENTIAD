@@ -98,6 +98,15 @@ Mode split:
 
 Prompt 1.4 remains local-only and mock-backed. The scripted backend is only there to validate loop structure, stop conditions, tool usage accounting, and artifact generation. It is not real VLM inference.
 
+## Prompt 2.0 Checkpoint Evaluation Path
+
+Prompt 2.0 keeps [src/agentiad_recon/baseline.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/baseline.py) as the single inference/evaluation entrypoint and extends it with a minimal real checkpoint-eval path instead of introducing a second evaluator:
+
+- `src/agentiad_recon/backends.py` now includes a `transformers` runtime adapter that can load a local base model and an optional local LoRA adapter checkpoint through `peft`
+- the same baseline/tool configs can now carry auditable runtime provenance including `base_model_path`, `adapter_checkpoint_path`, `adapter_loaded`, checkpoint lineage, deterministic generation settings, and runtime flags such as `local_files_only`, `trust_remote_code`, `dtype`, and `device`
+- Prompt 2.0 adds remote templates [configs/eval_transformers_no_tools_remote_template.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/eval_transformers_no_tools_remote_template.json) and [configs/eval_transformers_pz_cr_remote_template.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/eval_transformers_pz_cr_remote_template.json) so real MMAD evaluation still flows through the existing `baseline.py` entrypoint
+- local validation remains lightweight: `--dry-run`, schema checks, fixture-backed smoke runs, and mocked transformers backend tests validate the path without running heavy local inference or training
+
 ## Trajectory Reconstruction For SFT
 
 Prompt 1.5 builds the first canonical SFT-facing layer on top of the existing tool waist instead of inventing a parallel export stack:
