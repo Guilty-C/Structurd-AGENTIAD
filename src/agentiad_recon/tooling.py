@@ -134,33 +134,66 @@ class ToolResult:
         return payload
 
 
-def protocol_event(text: str) -> str:
-    """Classify one model output as a tool call, final answer, or continuation."""
+@dataclass(frozen=True)
+class ProtocolDecision:
+    """Structured runtime decision for one assistant output turn."""
 
-    has_tool_call = "<tool_call>" in text
-    has_final_answer = "<final_answer>" in text or "<answer>" in text
-    if has_tool_call and has_final_answer:
-        raise ToolContractError("Output cannot contain both a tool call and a final answer block")
-    if has_tool_call:
-        return "tool_call"
-    if has_final_answer:
-        return "final_answer"
-    return "continue"
+    event_type: str
+    parsed_call: ParsedToolCall | None = None
+    normalization_applied: bool = False
+    discarded_final_answer_present: bool = False
+    reason: str | None = None
+    raw_output: str = ""
+    valid_tool_call_count: int = 0
+    invalid_tool_call_errors: tuple[str, ...] = ()
+
+    def to_audit_payload(
+        self,
+        *,
+        sample_id: str,
+        turn_index: int,
+        raw_output_path: str,
+    ) -> dict[str, Any]:
+        """Convert one protocol decision into an auditable normalization sidecar."""
+
+        payload = {
+            "sample_id": sample_id,
+            "turn_index": turn_index,
+            "raw_output_path": raw_output_path,
+            "raw_output": self.raw_output,
+            "normalization_applied": self.normalization_applied,
+            "selected_protocol_event_type": self.event_type,
+            "selected_tool_call": (
+                {
+                    "call_id": self.parsed_call.call_id,
+                    "tool_name": self.parsed_call.tool_name,
+                    "arguments": self.parsed_call.arguments,
+                    "raw_text": self.parsed_call.raw_text,
+                }
+                if self.parsed_call is not None
+                else None
+            ),
+            "selected_tool_name": self.parsed_call.tool_name if self.parsed_call is not None else None,
+            "discarded_final_answer_present": self.discarded_final_answer_present,
+            "reason": self.reason,
+            "valid_tool_call_count": self.valid_tool_call_count,
+            "additional_valid_tool_calls_discarded": max(0, self.valid_tool_call_count - 1),
+            "invalid_tool_call_errors": list(self.invalid_tool_call_errors),
+        }
+        return payload
 
 
-def parse_tool_call(text: str, *, tool_path: str) -> ParsedToolCall:
-    """Parse and validate one tool-call block from assistant text."""
+def _has_final_answer_block(text: str) -> bool:
+    """Return whether assistant text contains a final-answer wrapper."""
 
-    if tool_path not in PROTOCOL_TOOL_PATHS:
-        raise ToolContractError(f"Unsupported tool_path: {tool_path}")
+    return "<final_answer>" in text or "<answer>" in text
 
-    match = TOOL_CALL_PATTERN.search(text)
-    if not match:
-        raise ToolContractError("No <tool_call> JSON block found in assistant output")
 
-    raw_block = match.group(0)
+def _parse_tool_call_block(raw_block: str, *, tool_path: str) -> ParsedToolCall:
+    """Parse one explicit tool-call block and validate its payload."""
+
     try:
-        payload = json.loads(match.group(1))
+        payload = json.loads(re.sub(r"^<tool_call>\s*|\s*</tool_call>$", "", raw_block, flags=re.DOTALL))
     except json.JSONDecodeError as exc:
         raise ToolContractError(f"Tool call JSON is malformed: {exc}") from exc
 
@@ -189,6 +222,102 @@ def parse_tool_call(text: str, *, tool_path: str) -> ParsedToolCall:
         {"raw_text": raw_block, "tool_name": tool_name, "arguments": arguments}
     )[:12]
     return ParsedToolCall(call_id=call_id, tool_name=tool_name, arguments=arguments, raw_text=raw_block)
+
+
+def _valid_tool_calls(text: str, *, tool_path: str) -> tuple[list[ParsedToolCall], list[str]]:
+    """Parse all tool-call blocks and keep only the legal ones."""
+
+    valid_calls: list[ParsedToolCall] = []
+    errors: list[str] = []
+    for match in TOOL_CALL_PATTERN.finditer(text):
+        raw_block = match.group(0)
+        try:
+            valid_calls.append(_parse_tool_call_block(raw_block, tool_path=tool_path))
+        except ToolContractError as exc:
+            errors.append(str(exc))
+    return valid_calls, errors
+
+
+def normalize_protocol_turn(text: str, *, tool_path: str) -> ProtocolDecision:
+    """Normalize one assistant turn into a deterministic protocol decision."""
+
+    if tool_path not in PROTOCOL_TOOL_PATHS:
+        raise ToolContractError(f"Unsupported tool_path: {tool_path}")
+
+    valid_calls, invalid_errors = _valid_tool_calls(text, tool_path=tool_path)
+    has_final_answer = _has_final_answer_block(text)
+
+    if valid_calls and has_final_answer:
+        return ProtocolDecision(
+            event_type="tool_call",
+            parsed_call=valid_calls[0],
+            normalization_applied=True,
+            discarded_final_answer_present=True,
+            reason="mixed_tool_call_and_final_answer",
+            raw_output=text,
+            valid_tool_call_count=len(valid_calls),
+            invalid_tool_call_errors=tuple(invalid_errors),
+        )
+    if len(valid_calls) > 1:
+        return ProtocolDecision(
+            event_type="tool_call",
+            parsed_call=valid_calls[0],
+            normalization_applied=True,
+            discarded_final_answer_present=False,
+            reason="multiple_tool_calls_in_single_output",
+            raw_output=text,
+            valid_tool_call_count=len(valid_calls),
+            invalid_tool_call_errors=tuple(invalid_errors),
+        )
+    if len(valid_calls) == 1:
+        return ProtocolDecision(
+            event_type="tool_call",
+            parsed_call=valid_calls[0],
+            raw_output=text,
+            valid_tool_call_count=1,
+            invalid_tool_call_errors=tuple(invalid_errors),
+        )
+    if has_final_answer:
+        return ProtocolDecision(
+            event_type="final_answer",
+            raw_output=text,
+            invalid_tool_call_errors=tuple(invalid_errors),
+        )
+    return ProtocolDecision(
+        event_type="continue",
+        raw_output=text,
+        invalid_tool_call_errors=tuple(invalid_errors),
+    )
+
+
+def protocol_event(text: str) -> str:
+    """Classify one model output as a tool call, final answer, or continuation."""
+
+    has_tool_call = "<tool_call>" in text
+    has_final_answer = _has_final_answer_block(text)
+    if has_tool_call and has_final_answer:
+        raise ToolContractError("Output cannot contain both a tool call and a final answer block")
+    if has_tool_call:
+        return "tool_call"
+    if has_final_answer:
+        return "final_answer"
+    return "continue"
+
+
+def parse_tool_call(text: str, *, tool_path: str) -> ParsedToolCall:
+    """Parse and validate one tool-call block from assistant text."""
+
+    if tool_path not in PROTOCOL_TOOL_PATHS:
+        raise ToolContractError(f"Unsupported tool_path: {tool_path}")
+
+    valid_calls, invalid_errors = _valid_tool_calls(text, tool_path=tool_path)
+    if valid_calls:
+        return valid_calls[0]
+    if invalid_errors:
+        raise ToolContractError("; ".join(invalid_errors))
+    if not TOOL_CALL_PATTERN.search(text):
+        raise ToolContractError("No <tool_call> JSON block found in assistant output")
+    raise ToolContractError("No legal <tool_call> block was found in assistant output")
 
 
 class PerceptiveZoomer:

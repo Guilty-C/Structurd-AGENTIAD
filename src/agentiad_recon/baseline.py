@@ -47,8 +47,8 @@ from agentiad_recon.prompting import (
 from agentiad_recon.reproducibility import build_run_metadata, sha256_file
 from agentiad_recon.tooling import (
     execute_tool_call,
+    normalize_protocol_turn,
     parse_tool_call,
-    protocol_event,
     reinsert_tool_result,
 )
 from agentiad_recon.traces import TraceMessage, TraceRecord
@@ -300,12 +300,15 @@ def _append_tool_request(
     tool_name: str | None,
     call_id: str | None,
     error_message: str | None = None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Append one assistant tool request, including invalid attempts for audit."""
 
     metadata = {"backend_name": backend_name, "raw_output_path": raw_output_path}
     if error_message is not None:
         metadata["error_message"] = error_message
+    if extra_metadata:
+        metadata.update(extra_metadata)
     history.append(
         {
             "role": "assistant",
@@ -380,6 +383,41 @@ def _raw_output_path(raw_root: Path, *, seed: int, sample_slug: str, turn_index:
     """Build a deterministic raw-output path for one assistant turn."""
 
     return raw_root / f"seed_{seed}" / sample_slug / f"turn_{turn_index}.txt"
+
+
+def _normalization_sidecar_path(raw_output_path: Path) -> Path:
+    """Build the sidecar path for one auditable normalization event."""
+
+    return raw_output_path.with_suffix(".normalization.json")
+
+
+def _normalization_summary(prediction_records: list[dict[str, Any]]) -> dict[str, int]:
+    """Aggregate mixed-output normalization counts across prediction records."""
+
+    summary = {
+        "event_count": 0,
+        "samples_with_events": 0,
+        "mixed_tool_call_and_final_answer_count": 0,
+        "multiple_tool_calls_in_single_output_count": 0,
+        "discarded_premature_final_answer_count": 0,
+        "additional_valid_tool_calls_discarded_count": 0,
+    }
+    for record in prediction_records:
+        events = record.get("metadata", {}).get("normalization_events", [])
+        if events:
+            summary["samples_with_events"] += 1
+        for event in events:
+            summary["event_count"] += 1
+            if event.get("reason") == "mixed_tool_call_and_final_answer":
+                summary["mixed_tool_call_and_final_answer_count"] += 1
+            if event.get("reason") == "multiple_tool_calls_in_single_output":
+                summary["multiple_tool_calls_in_single_output_count"] += 1
+            if event.get("discarded_final_answer_present"):
+                summary["discarded_premature_final_answer_count"] += 1
+            summary["additional_valid_tool_calls_discarded_count"] += int(
+                event.get("additional_valid_tool_calls_discarded", 0)
+            )
+    return summary
 
 
 def _artifact_dirs(definition: dict[str, Any], root: Path) -> dict[str, Path]:
@@ -724,6 +762,8 @@ def _tool_loop_sample(
     schema_valid = False
     error_message: str | None = None
     last_raw_output_path: Path | None = None
+    normalization_events: list[dict[str, Any]] = []
+    normalization_event_paths: list[str] = []
 
     for turn_index in range(definition["max_tool_turns"] + 1):
         request = BackendRequest(
@@ -750,7 +790,31 @@ def _tool_loop_sample(
         last_raw_output_path = raw_output_path
 
         _append_reasoning(history, response.raw_output, backend_name=response.backend_name)
-        event = protocol_event(response.raw_output)
+        decision = normalize_protocol_turn(response.raw_output, tool_path=definition["mode"])
+        event = decision.event_type
+        normalization_metadata: dict[str, Any] | None = None
+        if decision.normalization_applied:
+            sidecar_path = _normalization_sidecar_path(raw_output_path)
+            audit_payload = decision.to_audit_payload(
+                sample_id=sample["sample_id"],
+                turn_index=turn_index,
+                raw_output_path=str(raw_output_path.resolve()),
+            )
+            write_json(sidecar_path, audit_payload)
+            normalization_events.append(audit_payload)
+            normalization_event_paths.append(str(sidecar_path.resolve()))
+            normalization_metadata = {
+                "normalization_applied": True,
+                "normalization_reason": audit_payload["reason"],
+                "selected_protocol_event_type": audit_payload["selected_protocol_event_type"],
+                "selected_tool_name": audit_payload["selected_tool_name"],
+                "discarded_final_answer_present": audit_payload["discarded_final_answer_present"],
+                "valid_tool_call_count": audit_payload["valid_tool_call_count"],
+                "additional_valid_tool_calls_discarded": audit_payload[
+                    "additional_valid_tool_calls_discarded"
+                ],
+                "normalization_sidecar_path": str(sidecar_path.resolve()),
+            }
         if event == "tool_call":
             if len(tool_traces) >= definition["max_tool_turns"]:
                 error_message = f"Exceeded max_tool_turns={definition['max_tool_turns']} before final answer"
@@ -762,10 +826,14 @@ def _tool_loop_sample(
                     tool_name=None,
                     call_id=None,
                     error_message=error_message,
+                    extra_metadata=normalization_metadata,
                 )
                 break
             try:
-                parsed_call = parse_tool_call(response.raw_output, tool_path=definition["mode"])
+                parsed_call = decision.parsed_call or parse_tool_call(
+                    response.raw_output,
+                    tool_path=definition["mode"],
+                )
             except Exception as exc:  # noqa: BLE001 - explicit gate failure path.
                 error_message = str(exc)
                 _append_tool_request(
@@ -776,6 +844,7 @@ def _tool_loop_sample(
                     tool_name=None,
                     call_id=None,
                     error_message=error_message,
+                    extra_metadata=normalization_metadata,
                 )
                 break
 
@@ -786,6 +855,7 @@ def _tool_loop_sample(
                 raw_output_path=str(raw_output_path.resolve()),
                 tool_name=parsed_call.tool_name,
                 call_id=parsed_call.call_id,
+                extra_metadata=normalization_metadata,
             )
             tool_result = execute_tool_call(
                 parsed_call,
@@ -840,6 +910,12 @@ def _tool_loop_sample(
             "seed": seed,
             "sample_category": sample["category"],
             "tool_mode": definition["mode"],
+            "normalization_event_count": len(normalization_events),
+            "normalization_event_paths": normalization_event_paths,
+            "normalization_event_reasons": [
+                event["reason"] for event in normalization_events if event.get("reason") is not None
+            ],
+            "normalization_events": normalization_events,
         },
     )
     trace_payload = trace.to_audit_payload()
@@ -867,6 +943,12 @@ def _tool_loop_sample(
             "sample_source_kind": sample["metadata"].get("dataset_kind"),
             "tool_trace_count": len(tool_traces),
             "tool_names": [trace["tool_name"] for trace in tool_traces],
+            "normalization_event_count": len(normalization_events),
+            "normalization_event_paths": normalization_event_paths,
+            "normalization_event_reasons": [
+                event["reason"] for event in normalization_events if event.get("reason") is not None
+            ],
+            "normalization_events": normalization_events,
             "runtime_provenance": _resolved_runtime_provenance(
                 definition,
                 runtime_config,
@@ -921,6 +1003,7 @@ def run_tool_augmented(
         write_jsonl(directories["predictions"] / f"seed_{seed}.jsonl", seed_records)
 
     runtime_provenance = _resolved_runtime_provenance(definition, runtime_config, backend)
+    normalization_summary = _normalization_summary(prediction_records)
     metrics_report = build_metrics_report(
         run_id=definition["run_id"],
         tool_mode=definition["mode"],
@@ -1001,6 +1084,7 @@ def run_tool_augmented(
             "delta_report": str(delta_report_path.resolve()),
         },
         notes=definition.get("notes", []),
+        normalization_summary=normalization_summary,
     )
     summary_path = directories["root"] / "run_summary.json"
     write_json(summary_path, summary)
@@ -1019,6 +1103,7 @@ def run_tool_augmented(
         },
         "execution_boundary": definition["execution_boundary"],
         "run_provenance": runtime_provenance,
+        "normalization_summary": normalization_summary,
         "notes": [
             "Tool-augmented inference summary manifest.",
             (

@@ -82,6 +82,26 @@
         }
       }
     },
+    "normalization_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_count",
+        "samples_with_events",
+        "mixed_tool_call_and_final_answer_count",
+        "multiple_tool_calls_in_single_output_count",
+        "discarded_premature_final_answer_count",
+        "additional_valid_tool_calls_discarded_count"
+      ],
+      "properties": {
+        "event_count": { "type": "integer", "minimum": 0 },
+        "samples_with_events": { "type": "integer", "minimum": 0 },
+        "mixed_tool_call_and_final_answer_count": { "type": "integer", "minimum": 0 },
+        "multiple_tool_calls_in_single_output_count": { "type": "integer", "minimum": 0 },
+        "discarded_premature_final_answer_count": { "type": "integer", "minimum": 0 },
+        "additional_valid_tool_calls_discarded_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "runtime_provenance": {
       "$ref": "#/$defs/runtimeProvenance"
     },

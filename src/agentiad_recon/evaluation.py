@@ -281,6 +281,7 @@ def build_run_summary(
     runtime_provenance: dict[str, Any],
     artifact_paths: dict[str, str],
     notes: list[str] | None = None,
+    normalization_summary: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Create one compact summary manifest for the evidence package."""
 
@@ -317,6 +318,8 @@ def build_run_summary(
         "artifact_paths": artifact_paths,
         "notes": notes or [],
     }
+    if normalization_summary is not None:
+        summary["normalization_summary"] = normalization_summary
     validate_payload(summary, "baseline_run_summary.schema.json")
     return summary
 
