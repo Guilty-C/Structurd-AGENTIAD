@@ -106,6 +106,9 @@ Prompt 2.0 keeps [src/agentiad_recon/baseline.py](/home/zbr/project/lrrelevant/S
 - the same baseline/tool configs can now carry auditable runtime provenance including `base_model_path`, `adapter_checkpoint_path`, `adapter_loaded`, checkpoint lineage, deterministic generation settings, and runtime flags such as `local_files_only`, `trust_remote_code`, `dtype`, and `device`
 - Prompt 2.0 adds remote templates [configs/eval_transformers_no_tools_remote_template.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/eval_transformers_no_tools_remote_template.json) and [configs/eval_transformers_pz_cr_remote_template.json](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/configs/eval_transformers_pz_cr_remote_template.json) so real MMAD evaluation still flows through the existing `baseline.py` entrypoint
 - local validation remains lightweight: `--dry-run`, schema checks, fixture-backed smoke runs, and mocked transformers backend tests validate the path without running heavy local inference or training
+- the unified eval path supports a local base model plus an optional LoRA adapter checkpoint through the existing `baseline.py` entrypoint
+- device placement is handled inside the backend runtime path before `model.generate(...)`, including multimodal processor tensors
+- deterministic generation config is sanitized for clean transformer execution, so ignored sampling-only kwargs are not passed when `do_sample=false`
 
 ## Trajectory Reconstruction For SFT
 

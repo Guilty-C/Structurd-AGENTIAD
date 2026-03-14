@@ -504,6 +504,73 @@ class TransformersVisionLanguageBackend(InferenceBackend):
         if hasattr(self._model, "eval"):
             self._model.eval()
 
+    def _torch_device(self, value: Any) -> Any:
+        """Create a torch.device when the runtime exposes that constructor."""
+
+        if self._torch is not None and hasattr(self._torch, "device"):
+            return self._torch.device(value)
+        return value
+
+    def _infer_model_device(self, model: Any) -> Any:
+        """Infer the effective device that should receive model inputs."""
+
+        device_attr = getattr(model, "device", None)
+        if device_attr is not None:
+            return device_attr
+
+        hf_device_map = getattr(model, "hf_device_map", None)
+        if isinstance(hf_device_map, dict) and hf_device_map:
+            for mapped_device in hf_device_map.values():
+                if mapped_device in {"disk", None}:
+                    continue
+                if isinstance(mapped_device, int):
+                    return self._torch_device(f"cuda:{mapped_device}")
+                return self._torch_device(mapped_device)
+
+        parameters = getattr(model, "parameters", None)
+        if callable(parameters):
+            try:
+                first_parameter = next(parameters())
+                return first_parameter.device
+            except StopIteration:
+                pass
+
+        configured_device = self.runtime_config["device"]
+        if configured_device not in {None, "", "auto"}:
+            return self._torch_device(configured_device)
+        return self._torch_device("cpu")
+
+    def _move_batch_to_device(self, batch: Any, device: Any) -> Any:
+        """Recursively move tensor-like model inputs onto one target device."""
+
+        if self._torch is not None and hasattr(self._torch, "is_tensor") and self._torch.is_tensor(batch):
+            return batch.to(device)
+        if isinstance(batch, dict):
+            return {key: self._move_batch_to_device(value, device) for key, value in batch.items()}
+        if isinstance(batch, list):
+            return [self._move_batch_to_device(value, device) for value in batch]
+        if isinstance(batch, tuple):
+            return tuple(self._move_batch_to_device(value, device) for value in batch)
+        return batch
+
+    def _sanitize_generation_kwargs(self, generation_config: dict[str, Any]) -> dict[str, Any]:
+        """Drop sampling-only generation kwargs when deterministic generation is requested."""
+
+        sanitized = dict(generation_config)
+        if sanitized.get("do_sample", False):
+            return sanitized
+        for key in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "min_p",
+            "typical_p",
+            "epsilon_cutoff",
+            "eta_cutoff",
+        ):
+            sanitized.pop(key, None)
+        return sanitized
+
     def _message_text(self, message: dict[str, Any]) -> str:
         """Map canonical history messages to chat-template text payloads."""
 
@@ -559,9 +626,6 @@ class TransformersVisionLanguageBackend(InferenceBackend):
         if opened_images:
             processor_kwargs["images"] = opened_images
         encoded = self._processor(**processor_kwargs)
-        device = self.runtime_config["device"]
-        if device != "auto" and hasattr(encoded, "to"):
-            encoded = encoded.to(device)
         return encoded, opened_images
 
     def _truncate_at_stop_sequences(self, text: str, stop_sequences: list[str]) -> str:
@@ -584,10 +648,9 @@ class TransformersVisionLanguageBackend(InferenceBackend):
         self._load_model()
         encoded_inputs, opened_images = self._prepare_inputs(request)
         try:
-            generation_config = dict(self.runtime_config["generation"])
-            if not generation_config.get("do_sample", False):
-                generation_config.pop("temperature", None)
-                generation_config.pop("top_p", None)
+            model_device = self._infer_model_device(self._model)
+            encoded_inputs = self._move_batch_to_device(encoded_inputs, model_device)
+            generation_config = self._sanitize_generation_kwargs(self.runtime_config["generation"])
             output_ids = self._model.generate(**encoded_inputs, **generation_config)
             prompt_length = encoded_inputs["input_ids"].shape[-1]
             generated_ids = output_ids[:, prompt_length:]
