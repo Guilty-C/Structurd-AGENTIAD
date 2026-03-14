@@ -109,6 +109,7 @@ Prompt 2.0 keeps [src/agentiad_recon/baseline.py](/home/zbr/project/lrrelevant/S
 - the unified eval path supports a local base model plus an optional LoRA adapter checkpoint through the existing `baseline.py` entrypoint
 - device placement is handled inside the backend runtime path before `model.generate(...)`, including multimodal processor tensors
 - deterministic generation config is sanitized for clean transformer execution, so ignored sampling-only kwargs are not passed when `do_sample=false`
+- Prompt 2.1 cleaned deterministic generation hygiene first, and Prompt 2.2 further tightens real generate-input device placement by resolving the language-input device through the backend runtime path instead of suppressing warnings
 
 ## Trajectory Reconstruction For SFT
 

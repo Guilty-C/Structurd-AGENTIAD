@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from collections.abc import Mapping
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -511,14 +512,30 @@ class TransformersVisionLanguageBackend(InferenceBackend):
             return self._torch.device(value)
         return value
 
-    def _infer_model_device(self, model: Any) -> Any:
-        """Infer the effective device that should receive model inputs."""
+    def _module_parameter_device(self, module: Any) -> Any | None:
+        """Infer one module device from parameters or buffers when available."""
 
-        device_attr = getattr(model, "device", None)
-        if device_attr is not None:
-            return device_attr
+        parameters = getattr(module, "parameters", None)
+        if callable(parameters):
+            try:
+                first_parameter = next(parameters())
+                return first_parameter.device
+            except StopIteration:
+                pass
 
-        hf_device_map = getattr(model, "hf_device_map", None)
+        buffers = getattr(module, "buffers", None)
+        if callable(buffers):
+            try:
+                first_buffer = next(buffers())
+                return first_buffer.device
+            except StopIteration:
+                pass
+        return None
+
+    def _module_hf_device(self, module: Any) -> Any | None:
+        """Recover one device from a Hugging Face device map when present."""
+
+        hf_device_map = getattr(module, "hf_device_map", None)
         if isinstance(hf_device_map, dict) and hf_device_map:
             for mapped_device in hf_device_map.values():
                 if mapped_device in {"disk", None}:
@@ -526,14 +543,93 @@ class TransformersVisionLanguageBackend(InferenceBackend):
                 if isinstance(mapped_device, int):
                     return self._torch_device(f"cuda:{mapped_device}")
                 return self._torch_device(mapped_device)
+        return None
 
-        parameters = getattr(model, "parameters", None)
-        if callable(parameters):
+    def _module_direct_device(self, module: Any) -> Any | None:
+        """Return a direct `.device` attribute when the module exposes one."""
+
+        device_attr = getattr(module, "device", None)
+        if device_attr is not None:
+            return device_attr
+        return None
+
+    def _embedding_like_device(self, module: Any) -> Any | None:
+        """Prefer the language-input device over wrapper-level device shortcuts."""
+
+        if module is None:
+            return None
+
+        get_input_embeddings = getattr(module, "get_input_embeddings", None)
+        if callable(get_input_embeddings):
             try:
-                first_parameter = next(parameters())
-                return first_parameter.device
-            except StopIteration:
-                pass
+                input_embeddings = get_input_embeddings()
+            except Exception:  # noqa: BLE001
+                input_embeddings = None
+            if input_embeddings is not None:
+                if hasattr(input_embeddings, "weight") and hasattr(input_embeddings.weight, "device"):
+                    return input_embeddings.weight.device
+                device = self._module_parameter_device(input_embeddings)
+                if device is not None:
+                    return device
+
+        embed_tokens = getattr(module, "embed_tokens", None)
+        if embed_tokens is not None:
+            if hasattr(embed_tokens, "weight") and hasattr(embed_tokens.weight, "device"):
+                return embed_tokens.weight.device
+            device = self._module_parameter_device(embed_tokens)
+            if device is not None:
+                return device
+        return None
+
+    def _candidate_runtime_modules(self, model: Any) -> list[Any]:
+        """Collect likely PEFT/base/language submodules in preference order."""
+
+        candidates: list[Any] = []
+        queue = [model]
+        seen: set[int] = set()
+        attribute_names = (
+            "language_model",
+            "base_model",
+            "model",
+            "module",
+            "backbone",
+        )
+        while queue:
+            current = queue.pop(0)
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            candidates.append(current)
+            for name in attribute_names:
+                child = getattr(current, name, None)
+                if child is not None:
+                    queue.append(child)
+        return candidates
+
+    def _infer_model_device(self, model: Any) -> Any:
+        """Infer the effective device that should receive model inputs."""
+
+        candidates = self._candidate_runtime_modules(model)
+
+        for candidate in candidates:
+            device = self._embedding_like_device(candidate)
+            if device is not None:
+                return device
+
+        for candidate in candidates:
+            device = self._module_hf_device(candidate)
+            if device is not None:
+                return device
+
+        for candidate in candidates:
+            device = self._module_direct_device(candidate)
+            if device is not None:
+                return device
+
+        for candidate in candidates:
+            device = self._module_parameter_device(candidate)
+            if device is not None:
+                return device
 
         configured_device = self.runtime_config["device"]
         if configured_device not in {None, "", "auto"}:
@@ -545,12 +641,17 @@ class TransformersVisionLanguageBackend(InferenceBackend):
 
         if self._torch is not None and hasattr(self._torch, "is_tensor") and self._torch.is_tensor(batch):
             return batch.to(device)
-        if isinstance(batch, dict):
+        if isinstance(batch, Mapping):
             return {key: self._move_batch_to_device(value, device) for key, value in batch.items()}
         if isinstance(batch, list):
             return [self._move_batch_to_device(value, device) for value in batch]
         if isinstance(batch, tuple):
             return tuple(self._move_batch_to_device(value, device) for value in batch)
+        if hasattr(batch, "to") and callable(batch.to):
+            try:
+                return batch.to(device)
+            except TypeError:
+                return batch
         return batch
 
     def _sanitize_generation_kwargs(self, generation_config: dict[str, Any]) -> dict[str, Any]:
