@@ -159,6 +159,60 @@ def write_zero_tool_behavior_sidecars(
     }
 
 
+def build_tool_first_strategy_summary(
+    *,
+    tool_first_intervention_strategy: str,
+    runtime_provenance: dict[str, Any],
+    prompt_audit_summary: dict[str, Any] | None,
+    zero_tool_behavior_summary: dict[str, Any],
+    metrics_report: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one per-run strategy summary that is easy to compare across runs."""
+
+    aggregate_metrics = metrics_report["aggregate_metrics"]
+    return {
+        "tool_mode": runtime_provenance["tool_mode"],
+        "tool_first_intervention_strategy": tool_first_intervention_strategy,
+        "sample_count": metrics_report["sample_count"],
+        "evaluated_count": metrics_report["evaluated_count"],
+        "failed_count": metrics_report["failed_count"],
+        "toolcall_rate": aggregate_metrics["toolcall_rate"]["mean"],
+        "per_tool_frequency": {
+            tool: aggregate_metrics["per_tool_frequency"][tool]["mean"]
+            for tool in sorted(aggregate_metrics["per_tool_frequency"])
+        },
+        "zero_tool_behavior_summary": zero_tool_behavior_summary,
+        "prompt_audit_summary": prompt_audit_summary,
+        "runtime_provenance": runtime_provenance,
+    }
+
+
+def write_tool_first_strategy_summary(
+    *,
+    metrics_dir: str | Path,
+    tool_first_intervention_strategy: str,
+    runtime_provenance: dict[str, Any],
+    prompt_audit_summary: dict[str, Any] | None,
+    zero_tool_behavior_summary: dict[str, Any],
+    metrics_report: dict[str, Any],
+) -> str:
+    """Write one deterministic per-strategy run summary artifact."""
+
+    metrics_dir = Path(metrics_dir)
+    path = metrics_dir / "tool_first_strategy_summary.json"
+    write_json(
+        path,
+        build_tool_first_strategy_summary(
+            tool_first_intervention_strategy=tool_first_intervention_strategy,
+            runtime_provenance=runtime_provenance,
+            prompt_audit_summary=prompt_audit_summary,
+            zero_tool_behavior_summary=zero_tool_behavior_summary,
+            metrics_report=metrics_report,
+        ),
+    )
+    return str(path.resolve())
+
+
 def _load_jsonl(path: str | Path) -> list[dict[str, Any]]:
     """Read a JSONL dataset into memory for lightweight auditing."""
 

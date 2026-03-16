@@ -36,6 +36,10 @@
     "sample_count": { "type": "integer", "minimum": 0 },
     "evaluated_count": { "type": "integer", "minimum": 0 },
     "failed_count": { "type": "integer", "minimum": 0 },
+    "tool_first_intervention_strategy": {
+      "type": "string",
+      "enum": ["baseline", "tool_first_nudge", "tool_first_strict"]
+    },
     "prompt_audit_summary": {
       "type": "object",
       "additionalProperties": false,
@@ -214,7 +218,8 @@
         "local_files_only",
         "trust_remote_code",
         "dtype",
-        "device"
+        "device",
+        "tool_first_intervention_strategy"
       ],
       "properties": {
         "runtime_backend_name": { "type": "string", "minLength": 1 },
@@ -241,7 +246,11 @@
         "local_files_only": { "type": "boolean" },
         "trust_remote_code": { "type": "boolean" },
         "dtype": { "type": "string", "minLength": 1 },
-        "device": { "type": "string", "minLength": 1 }
+        "device": { "type": "string", "minLength": 1 },
+        "tool_first_intervention_strategy": {
+          "type": "string",
+          "enum": ["baseline", "tool_first_nudge", "tool_first_strict"]
+        }
       }
     }
   }

@@ -10,6 +10,7 @@ trace storage, evaluator family, and artifact grammar. Use
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ from agentiad_recon.backends import (
 from agentiad_recon.behavior_audit import (
     build_zero_tool_behavior_fields,
     summarize_zero_tool_behavior,
+    write_tool_first_strategy_summary,
     write_zero_tool_behavior_sidecars,
 )
 from agentiad_recon.contracts import validate_payload
@@ -45,6 +47,8 @@ from agentiad_recon.prompting import (
     BASELINE_PROMPT_VERSION,
     FINAL_ANSWER_PARSER_VERSION,
     PROMPT_VERSION,
+    TOOL_FIRST_CONTRACT_STRENGTH,
+    TOOL_FIRST_INTERVENTION_STRATEGIES,
     build_baseline_prompt,
     build_prompt,
     extract_think_block,
@@ -126,6 +130,7 @@ def _runtime_defaults() -> dict[str, Any]:
             "temperature": 0.0,
             "top_p": 1.0,
         },
+        "tool_first_intervention_strategy": "baseline",
     }
 
 
@@ -152,6 +157,7 @@ def _runtime_config(
         "trust_remote_code",
         "dtype",
         "device",
+        "tool_first_intervention_strategy",
     ):
         if runtime_overrides and key in runtime_overrides and runtime_overrides[key] is not None:
             config[key] = runtime_overrides[key]
@@ -161,6 +167,11 @@ def _runtime_config(
         config["checkpoint_step"] = inferred["checkpoint_step"]
     if config["checkpoint_run_dir"] is None:
         config["checkpoint_run_dir"] = inferred["checkpoint_run_dir"]
+    if config["tool_first_intervention_strategy"] not in TOOL_FIRST_INTERVENTION_STRATEGIES:
+        raise InferenceRunError(
+            "Unsupported tool_first_intervention_strategy: "
+            f"{config['tool_first_intervention_strategy']!r}"
+        )
 
     resolved_dataset_root = _resolve_path(dataset_root or definition["sample_source"]["path"])
     config["dataset_root"] = str(resolved_dataset_root)
@@ -198,6 +209,7 @@ def _resolved_runtime_provenance(
         "trust_remote_code": runtime_config["trust_remote_code"],
         "dtype": runtime_config["dtype"],
         "device": runtime_config["device"],
+        "tool_first_intervention_strategy": runtime_config["tool_first_intervention_strategy"],
     }
 
 
@@ -445,6 +457,7 @@ def _prompt_audit_payload(
     seed: int,
     turn_index: int,
     runtime_tool_mode: str,
+    tool_first_intervention_strategy: str,
 ) -> dict[str, Any]:
     """Build an auditable snapshot of the rendered prompt/tool surface."""
 
@@ -474,6 +487,9 @@ def _prompt_audit_payload(
     )
     prompt_contains_pz_cr = "pz_cr" in rendered_text_lower
     cr_available_in_prompt_surface = "available tools: pz and cr" in rendered_text_lower
+    prompt_surface_digest = hashlib.sha256(rendered_text.encode("utf-8")).hexdigest()
+    tool_first_marker_present = "tool-first intervention strategy:" in rendered_text_lower
+    intervention_text_applied = tool_first_marker_present
     mismatch_reasons: list[str] = []
     if runtime_tool_mode == "pz_cr":
         if prompt_contains_pz_only:
@@ -486,12 +502,17 @@ def _prompt_audit_payload(
         "seed": seed,
         "turn_index": turn_index,
         "runtime_tool_mode": runtime_tool_mode,
+        "tool_first_intervention_strategy": tool_first_intervention_strategy,
+        "tool_first_contract_strength": TOOL_FIRST_CONTRACT_STRENGTH[tool_first_intervention_strategy],
+        "intervention_text_applied": intervention_text_applied,
+        "prompt_surface_digest": prompt_surface_digest,
         "system_text": system_text,
         "user_text": user_text,
         "rendered_text": rendered_text,
         "declared_available_tools": declared_available_tools,
         "prompt_contains_pz_only": prompt_contains_pz_only,
         "prompt_contains_pz_cr": prompt_contains_pz_cr,
+        "prompt_surface_contains_tool_first_marker": tool_first_marker_present,
         "tool_surface_contains_pz": re.search(r"\bPZ\b", rendered_text) is not None,
         "tool_surface_contains_cr": re.search(r"\bCR\b", rendered_text) is not None,
         "cr_available_in_prompt_surface": cr_available_in_prompt_surface,
@@ -918,7 +939,11 @@ def _tool_loop_sample(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Execute the bounded tool loop for one sample and return its artifacts."""
 
-    prompt_bundle = build_prompt(sample, tool_path=definition["mode"])
+    prompt_bundle = build_prompt(
+        sample,
+        tool_path=definition["mode"],
+        tool_first_intervention_strategy=runtime_config["tool_first_intervention_strategy"],
+    )
     history = _prompt_history(prompt_bundle)
     sample_slug = safe_slug(sample["sample_id"])
     tool_traces: list[dict[str, Any]] = []
@@ -940,6 +965,7 @@ def _tool_loop_sample(
         seed=seed,
         turn_index=0,
         runtime_tool_mode=definition["mode"],
+        tool_first_intervention_strategy=runtime_config["tool_first_intervention_strategy"],
     )
     write_json(prompt_audit_path, prompt_audit)
 
@@ -1261,6 +1287,7 @@ def run_tool_augmented(
         prediction_records=prediction_records,
         seeds=definition["seeds"],
         runtime_provenance=runtime_provenance,
+        tool_first_intervention_strategy=runtime_provenance["tool_first_intervention_strategy"],
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
     )
@@ -1272,6 +1299,14 @@ def run_tool_augmented(
     write_json(per_seed_metrics_path, {"per_seed_metrics": metrics_report["per_seed_metrics"]})
     write_json(per_class_metrics_path, {"per_class_metrics": metrics_report["per_class_metrics"]})
     write_json(aggregate_metrics_path, {"aggregate_metrics": metrics_report["aggregate_metrics"]})
+    strategy_summary_path = write_tool_first_strategy_summary(
+        metrics_dir=directories["metrics"],
+        tool_first_intervention_strategy=runtime_provenance["tool_first_intervention_strategy"],
+        runtime_provenance=runtime_provenance,
+        prompt_audit_summary=prompt_audit_summary,
+        zero_tool_behavior_summary=zero_tool_behavior_summary,
+        metrics_report=metrics_report,
+    )
 
     compare_artifact_root = _comparison_artifact_root(definition, artifact_root)
     baseline_result = run_baseline(
@@ -1334,8 +1369,10 @@ def run_tool_augmented(
             "delta_report": str(delta_report_path.resolve()),
             "per_dataset_zero_tool_behavior": zero_tool_sidecars["per_dataset_zero_tool_behavior"],
             "per_category_zero_tool_behavior": zero_tool_sidecars["per_category_zero_tool_behavior"],
+            "tool_first_strategy_summary": strategy_summary_path,
         },
         notes=definition.get("notes", []),
+        tool_first_intervention_strategy=runtime_provenance["tool_first_intervention_strategy"],
         normalization_summary=normalization_summary,
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
@@ -1356,6 +1393,7 @@ def run_tool_augmented(
             "delta_report": sha256_file(delta_report_path),
         },
         "execution_boundary": definition["execution_boundary"],
+        "tool_first_intervention_strategy": runtime_provenance["tool_first_intervention_strategy"],
         "run_provenance": runtime_provenance,
         "normalization_summary": normalization_summary,
         "prompt_audit_summary": prompt_audit_summary,
@@ -1475,6 +1513,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--do-sample", dest="do_sample", action="store_true")
     parser.add_argument("--no-do-sample", dest="do_sample", action="store_false")
     parser.set_defaults(do_sample=None)
+    parser.add_argument(
+        "--tool-first-intervention-strategy",
+        choices=TOOL_FIRST_INTERVENTION_STRATEGIES,
+        help="Optional first-turn prompt intervention strategy override for tool-enabled pz_cr eval.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate config/runtime surfaces without inference.")
     return parser
 
@@ -1492,6 +1535,7 @@ def main() -> int:
         "dtype": args.dtype,
         "local_files_only": args.local_files_only,
         "trust_remote_code": args.trust_remote_code,
+        "tool_first_intervention_strategy": args.tool_first_intervention_strategy,
         "generation": {
             key: value
             for key, value in {

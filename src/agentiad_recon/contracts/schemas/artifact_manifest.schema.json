@@ -51,6 +51,10 @@
       "type": "string",
       "enum": ["local", "remote"]
     },
+    "tool_first_intervention_strategy": {
+      "type": "string",
+      "enum": ["baseline", "tool_first_nudge", "tool_first_strict"]
+    },
     "run_provenance": {
       "type": "object",
       "additionalProperties": false,
@@ -71,7 +75,8 @@
         "local_files_only",
         "trust_remote_code",
         "dtype",
-        "device"
+        "device",
+        "tool_first_intervention_strategy"
       ],
       "properties": {
         "runtime_backend_name": { "type": "string", "minLength": 1 },
@@ -106,7 +111,11 @@
         "local_files_only": { "type": "boolean" },
         "trust_remote_code": { "type": "boolean" },
         "dtype": { "type": "string", "minLength": 1 },
-        "device": { "type": "string", "minLength": 1 }
+        "device": { "type": "string", "minLength": 1 },
+        "tool_first_intervention_strategy": {
+          "type": "string",
+          "enum": ["baseline", "tool_first_nudge", "tool_first_strict"]
+        }
       }
     },
     "normalization_summary": {

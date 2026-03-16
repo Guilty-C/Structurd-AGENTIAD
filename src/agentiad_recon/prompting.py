@@ -21,6 +21,16 @@ from agentiad_recon.contracts import validate_payload
 PROMPT_VERSION = "agentiad_tool_prompt_v1_4"
 BASELINE_PROMPT_VERSION = "agentiad_baseline_prompt_v1_3"
 FINAL_ANSWER_PARSER_VERSION = "agentiad_final_answer_parser_v1_3"
+TOOL_FIRST_INTERVENTION_STRATEGIES = (
+    "baseline",
+    "tool_first_nudge",
+    "tool_first_strict",
+)
+TOOL_FIRST_CONTRACT_STRENGTH = {
+    "baseline": "baseline",
+    "tool_first_nudge": "nudge",
+    "tool_first_strict": "strict",
+}
 BASELINE_ANSWER_TEMPLATE = """<think>
 short reasoning notes
 </think>
@@ -74,7 +84,33 @@ def _tooling_instruction(tool_path: str) -> str:
     raise ValueError(f"Unsupported tool_path: {tool_path}")
 
 
-def build_prompt(sample: dict[str, Any], *, tool_path: str) -> PromptBundle:
+def _tool_first_intervention_instruction(tool_path: str, strategy: str) -> str:
+    """Return an optional first-turn tool-first intervention suffix."""
+
+    if strategy not in TOOL_FIRST_INTERVENTION_STRATEGIES:
+        raise ValueError(f"Unsupported tool-first intervention strategy: {strategy}")
+    if tool_path != "pz_cr" or strategy == "baseline":
+        return ""
+    if strategy == "tool_first_nudge":
+        return (
+            "Tool-first intervention strategy: tool_first_nudge. "
+            "Before committing to a final answer in pz_cr mode, prefer to inspect with PZ and use CR when "
+            "a same-category normal reference could reduce uncertainty."
+        )
+    return (
+        "Tool-first intervention strategy: tool_first_strict. "
+        "In pz_cr mode, do not give a first-turn final answer when tool use could help localization or "
+        "comparison; your first assistant action should normally be one <tool_call> using PZ or CR before "
+        "any terminal <answer>."
+    )
+
+
+def build_prompt(
+    sample: dict[str, Any],
+    *,
+    tool_path: str,
+    tool_first_intervention_strategy: str = "baseline",
+) -> PromptBundle:
     """Build the canonical tool-enabled prompt contract for one sample and mode."""
 
     image_rule = (
@@ -94,6 +130,12 @@ def build_prompt(sample: dict[str, Any], *, tool_path: str) -> PromptBundle:
         f"{image_rule}\n"
         f"{_tooling_instruction(tool_path)}"
     )
+    intervention_instruction = _tool_first_intervention_instruction(
+        tool_path,
+        tool_first_intervention_strategy,
+    )
+    if intervention_instruction:
+        user_message = f"{user_message}\n{intervention_instruction}"
 
     # Stop sequences are explicit so later framework integrations can preserve
     # the same contract without reconstructing it from prompt prose.

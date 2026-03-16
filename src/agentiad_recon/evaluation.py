@@ -198,6 +198,7 @@ def build_metrics_report(
     prediction_records: list[dict[str, Any]],
     seeds: list[int],
     runtime_provenance: dict[str, Any],
+    tool_first_intervention_strategy: str | None = None,
     prompt_audit_summary: dict[str, int] | None = None,
     zero_tool_behavior_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -267,6 +268,8 @@ def build_metrics_report(
         "per_class_metrics": per_class_metrics,
         "aggregate_metrics": aggregate_metrics,
     }
+    if tool_first_intervention_strategy is not None:
+        report["tool_first_intervention_strategy"] = tool_first_intervention_strategy
     if prompt_audit_summary is not None:
         report["prompt_audit_summary"] = prompt_audit_summary
     if zero_tool_behavior_summary is not None:
@@ -303,6 +306,7 @@ def build_run_summary(
     runtime_provenance: dict[str, Any],
     artifact_paths: dict[str, str],
     notes: list[str] | None = None,
+    tool_first_intervention_strategy: str | None = None,
     normalization_summary: dict[str, int] | None = None,
     prompt_audit_summary: dict[str, int] | None = None,
     zero_tool_behavior_summary: dict[str, Any] | None = None,
@@ -342,6 +346,8 @@ def build_run_summary(
         "artifact_paths": artifact_paths,
         "notes": notes or [],
     }
+    if tool_first_intervention_strategy is not None:
+        summary["tool_first_intervention_strategy"] = tool_first_intervention_strategy
     if normalization_summary is not None:
         summary["normalization_summary"] = normalization_summary
     if prompt_audit_summary is not None:

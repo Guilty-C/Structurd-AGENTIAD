@@ -162,6 +162,10 @@
           "type": "string",
           "minLength": 1
         },
+        "tool_first_intervention_strategy": {
+          "type": "string",
+          "enum": ["baseline", "tool_first_nudge", "tool_first_strict"]
+        },
         "generation": {
           "type": "object",
           "additionalProperties": false,

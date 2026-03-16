@@ -76,6 +76,7 @@ class Prompt24PromptAuditTests(unittest.TestCase):
             seed=0,
             turn_index=0,
             runtime_tool_mode="pz_cr",
+            tool_first_intervention_strategy="baseline",
         )
 
         self.assertEqual(audit_payload["runtime_tool_mode"], "pz_cr")
@@ -93,7 +94,7 @@ class Prompt24PromptAuditTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tempdir, mock.patch(
             "agentiad_recon.baseline.build_prompt",
-            side_effect=lambda sample, tool_path: self._leaked_pz_only_prompt(sample),
+            side_effect=lambda sample, tool_path, **_kwargs: self._leaked_pz_only_prompt(sample),
         ):
             directories = _artifact_dirs(definition, Path(tempdir))
             record, trace_payload = _tool_loop_sample(
@@ -146,7 +147,7 @@ class Prompt24PromptAuditTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tempdir, mock.patch(
             "agentiad_recon.baseline.build_prompt",
-            side_effect=lambda sample, tool_path: self._leaked_pz_only_prompt(sample),
+            side_effect=lambda sample, tool_path, **_kwargs: self._leaked_pz_only_prompt(sample),
         ), mock.patch.object(
             MockToolAwareBackend,
             "generate",
