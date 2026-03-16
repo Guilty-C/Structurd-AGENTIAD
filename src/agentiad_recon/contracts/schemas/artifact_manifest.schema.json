@@ -147,6 +147,30 @@
         "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
       }
     },
+    "zero_tool_behavior_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "turn0_direct_final_answer_count",
+        "turn0_tool_call_count",
+        "samples_with_any_tool_call",
+        "zero_tool_terminal_count",
+        "zero_tool_terminal_false_null_count",
+        "zero_tool_terminal_ratio",
+        "zero_tool_terminal_false_null_ratio",
+        "failed_count_with_missing_reason_count"
+      ],
+      "properties": {
+        "turn0_direct_final_answer_count": { "type": "integer", "minimum": 0 },
+        "turn0_tool_call_count": { "type": "integer", "minimum": 0 },
+        "samples_with_any_tool_call": { "type": "integer", "minimum": 0 },
+        "zero_tool_terminal_count": { "type": "integer", "minimum": 0 },
+        "zero_tool_terminal_false_null_count": { "type": "integer", "minimum": 0 },
+        "zero_tool_terminal_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "zero_tool_terminal_false_null_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "notes": {
       "type": "array",
       "items": {

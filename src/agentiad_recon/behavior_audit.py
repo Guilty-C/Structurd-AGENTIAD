@@ -1,0 +1,341 @@
+"""Thin behavior-audit helpers for eval-side and train-side zero-tool analysis."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any, Iterable
+
+from agentiad_recon.evaluation import write_json
+from agentiad_recon.prompting import parse_final_answer
+
+
+ZERO_TOOL_SUMMARY_KEYS = (
+    "sample_count",
+    "turn0_direct_final_answer_count",
+    "turn0_tool_call_count",
+    "samples_with_any_tool_call",
+    "zero_tool_terminal_count",
+    "zero_tool_terminal_false_null_count",
+)
+
+
+def build_zero_tool_behavior_fields(
+    *,
+    first_protocol_event_type: str,
+    called_tools: list[str],
+    terminal_answer_present: bool,
+    terminal_answer_turn_index: int | None,
+    prediction: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build deterministic per-sample zero-tool behavior fields."""
+
+    tool_call_count = len(called_tools)
+    terminal_without_tool_call = terminal_answer_present and tool_call_count == 0
+    terminal_false_null_without_tool_call = (
+        terminal_without_tool_call
+        and prediction is not None
+        and prediction.get("anomaly_present") is False
+        and prediction.get("top_anomaly") is None
+    )
+    return {
+        "first_protocol_event_type": first_protocol_event_type,
+        "first_assistant_output_terminal": first_protocol_event_type == "final_answer",
+        "tool_call_count": tool_call_count,
+        "called_tools": called_tools,
+        "terminal_without_tool_call": terminal_without_tool_call,
+        "terminal_false_null_without_tool_call": terminal_false_null_without_tool_call,
+        "terminal_answer_turn_index": terminal_answer_turn_index,
+    }
+
+
+def summarize_zero_tool_behavior(prediction_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate zero-tool behavior statistics across prediction records."""
+
+    sample_count = len(prediction_records)
+    turn0_direct_final_answer_count = sum(
+        1 for record in prediction_records if record["first_protocol_event_type"] == "final_answer"
+    )
+    turn0_tool_call_count = sum(
+        1 for record in prediction_records if record["first_protocol_event_type"] == "tool_call"
+    )
+    samples_with_any_tool_call = sum(1 for record in prediction_records if record["tool_call_count"] > 0)
+    zero_tool_terminal_count = sum(
+        1 for record in prediction_records if record["terminal_without_tool_call"]
+    )
+    zero_tool_terminal_false_null_count = sum(
+        1 for record in prediction_records if record["terminal_false_null_without_tool_call"]
+    )
+    failed_count_with_missing_reason_count = sum(
+        1
+        for record in prediction_records
+        if (
+            record["prediction"] is None or not record["parser_valid"] or not record["schema_valid"]
+        )
+        and (record.get("failure_reason") is None or not str(record["failure_reason"]).strip())
+    )
+    return {
+        "turn0_direct_final_answer_count": turn0_direct_final_answer_count,
+        "turn0_tool_call_count": turn0_tool_call_count,
+        "samples_with_any_tool_call": samples_with_any_tool_call,
+        "zero_tool_terminal_count": zero_tool_terminal_count,
+        "zero_tool_terminal_false_null_count": zero_tool_terminal_false_null_count,
+        "zero_tool_terminal_ratio": (zero_tool_terminal_count / sample_count) if sample_count else 0.0,
+        "zero_tool_terminal_false_null_ratio": (
+            zero_tool_terminal_false_null_count / sample_count
+        )
+        if sample_count
+        else 0.0,
+        "failed_count_with_missing_reason_count": failed_count_with_missing_reason_count,
+    }
+
+
+def grouped_zero_tool_behavior(
+    prediction_records: list[dict[str, Any]],
+    *,
+    key_name: str,
+    key_fn: Any,
+) -> dict[str, dict[str, Any]]:
+    """Group prediction records and summarize zero-tool behavior for each key."""
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in prediction_records:
+        key = str(key_fn(record))
+        grouped.setdefault(key, []).append(record)
+
+    payload: dict[str, dict[str, Any]] = {}
+    for key in sorted(grouped):
+        records = grouped[key]
+        summary = summarize_zero_tool_behavior(records)
+        payload[key] = {
+            "sample_count": len(records),
+            "samples_with_any_tool_call": summary["samples_with_any_tool_call"],
+            "zero_tool_terminal_count": summary["zero_tool_terminal_count"],
+            "zero_tool_terminal_false_null_count": summary["zero_tool_terminal_false_null_count"],
+            "turn0_direct_final_answer_count": summary["turn0_direct_final_answer_count"],
+            "turn0_tool_call_count": summary["turn0_tool_call_count"],
+            key_name: key,
+        }
+    return payload
+
+
+def write_zero_tool_behavior_sidecars(
+    *,
+    prediction_records: list[dict[str, Any]],
+    metrics_dir: str | Path,
+) -> dict[str, str]:
+    """Write deterministic per-dataset and per-category zero-tool behavior sidecars."""
+
+    metrics_dir = Path(metrics_dir)
+    per_dataset_path = metrics_dir / "per_dataset_zero_tool_behavior.json"
+    per_category_path = metrics_dir / "per_category_zero_tool_behavior.json"
+
+    write_json(
+        per_dataset_path,
+        {
+            "scope": "dataset",
+            "groups": grouped_zero_tool_behavior(
+                prediction_records,
+                key_name="dataset",
+                key_fn=lambda record: record["metadata"].get("sample_source_kind", "unknown"),
+            ),
+        },
+    )
+    write_json(
+        per_category_path,
+        {
+            "scope": "category",
+            "groups": grouped_zero_tool_behavior(
+                prediction_records,
+                key_name="category",
+                key_fn=lambda record: record["category"],
+            ),
+        },
+    )
+    return {
+        "per_dataset_zero_tool_behavior": str(per_dataset_path.resolve()),
+        "per_category_zero_tool_behavior": str(per_category_path.resolve()),
+    }
+
+
+def _load_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    """Read a JSONL dataset into memory for lightweight auditing."""
+
+    rows: list[dict[str, Any]] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            rows.append(json.loads(line))
+    return rows
+
+
+def _canonical_behavior_row(record: dict[str, Any]) -> dict[str, Any]:
+    """Extract tool-first behavior signals from one canonical SFT dataset row."""
+
+    assistant_events = [
+        message
+        for message in record["messages"]
+        if message["role"] == "assistant" and message["message_type"] in {"tool_request", "final_answer"}
+    ]
+    first_event = assistant_events[0]["message_type"] if assistant_events else "unknown"
+    final_answer = record.get("final_answer")
+    zero_tool_terminal = len(record["tool_events"]) == 0 and final_answer is not None
+    false_null = (
+        zero_tool_terminal
+        and final_answer.get("anomaly_present") is False
+        and final_answer.get("top_anomaly") is None
+    )
+    return {
+        "sample_id": record["sample_id"],
+        "dataset": record["sample"]["metadata"].get("dataset_kind", record["sample"]["source"]),
+        "category": record["sample"]["category"],
+        "first_assistant_protocol_event": "tool_call" if first_event == "tool_request" else "final_answer",
+        "tool_event_count": len(record["tool_events"]),
+        "zero_tool_terminal": zero_tool_terminal,
+        "terminal_false_null_without_tool": false_null,
+    }
+
+
+def _swift_behavior_row(record: dict[str, Any]) -> dict[str, Any]:
+    """Extract tool-first behavior signals from one MS-Swift-facing row."""
+
+    assistant_messages = [message for message in record["messages"] if message["role"] == "assistant"]
+    first_event = "unknown"
+    for message in assistant_messages:
+        if message.get("tool_name"):
+            first_event = "tool_call"
+            break
+        if "<answer>" in message["content"] or "<final_answer>" in message["content"]:
+            first_event = "final_answer"
+            break
+    tool_call_count = sum(1 for message in assistant_messages if message.get("tool_name"))
+    parsed_final_answer: dict[str, Any] | None = None
+    for message in reversed(assistant_messages):
+        if "<answer>" in message["content"] or "<final_answer>" in message["content"]:
+            try:
+                parsed_final_answer = parse_final_answer(message["content"])
+            except Exception:  # noqa: BLE001 - audit should remain read-only and tolerant.
+                parsed_final_answer = None
+            break
+    zero_tool_terminal = tool_call_count == 0 and parsed_final_answer is not None
+    false_null = (
+        zero_tool_terminal
+        and parsed_final_answer.get("anomaly_present") is False
+        and parsed_final_answer.get("top_anomaly") is None
+    )
+    return {
+        "sample_id": record["metadata"]["sample_id"],
+        "dataset": "ms_swift_projection",
+        "category": record["metadata"].get("category", "unknown"),
+        "first_assistant_protocol_event": first_event,
+        "tool_event_count": tool_call_count,
+        "zero_tool_terminal": zero_tool_terminal,
+        "terminal_false_null_without_tool": false_null,
+    }
+
+
+def audit_train_side_dataset(
+    dataset_path: str | Path,
+    *,
+    dataset_format: str = "auto",
+) -> dict[str, Any]:
+    """Audit pz_cr supervision strength from an exported SFT dataset JSONL."""
+
+    rows = _load_jsonl(dataset_path)
+    if not rows:
+        raise ValueError("Train-side audit cannot run on an empty dataset.")
+
+    if dataset_format == "auto":
+        if "trajectory_mode" in rows[0]:
+            dataset_format = "canonical"
+        elif "metadata" in rows[0] and "trajectory_mode" in rows[0]["metadata"]:
+            dataset_format = "ms_swift"
+        else:
+            raise ValueError("Could not infer dataset format for train-side behavior audit.")
+
+    behavior_rows: list[dict[str, Any]] = []
+    for row in rows:
+        row_mode = row["trajectory_mode"] if dataset_format == "canonical" else row["metadata"]["trajectory_mode"]
+        if row_mode != "pz_cr":
+            continue
+        behavior_rows.append(
+            _canonical_behavior_row(row) if dataset_format == "canonical" else _swift_behavior_row(row)
+        )
+
+    if not behavior_rows:
+        raise ValueError("Train-side audit found zero pz_cr rows in the dataset.")
+
+    pz_cr_record_count = len(behavior_rows)
+    first_assistant_tool_call_count = sum(
+        1 for row in behavior_rows if row["first_assistant_protocol_event"] == "tool_call"
+    )
+    first_assistant_final_answer_count = sum(
+        1 for row in behavior_rows if row["first_assistant_protocol_event"] == "final_answer"
+    )
+    zero_tool_terminal_count = sum(1 for row in behavior_rows if row["zero_tool_terminal"])
+    false_null_count = sum(1 for row in behavior_rows if row["terminal_false_null_without_tool"])
+
+    def _group(rows_for_group: Iterable[dict[str, Any]], *, key: str) -> dict[str, Any]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows_for_group:
+            grouped.setdefault(str(row[key]), []).append(row)
+        payload: dict[str, Any] = {}
+        for group_key in sorted(grouped):
+            subset = grouped[group_key]
+            subset_count = len(subset)
+            payload[group_key] = {
+                "pz_cr_record_count": subset_count,
+                "first_assistant_tool_call_count": sum(
+                    1 for row in subset if row["first_assistant_protocol_event"] == "tool_call"
+                ),
+                "first_assistant_final_answer_count": sum(
+                    1 for row in subset if row["first_assistant_protocol_event"] == "final_answer"
+                ),
+                "tool_first_ratio": (
+                    sum(1 for row in subset if row["first_assistant_protocol_event"] == "tool_call") / subset_count
+                ),
+                "zero_tool_terminal_ratio": (
+                    sum(1 for row in subset if row["zero_tool_terminal"]) / subset_count
+                ),
+                "terminal_false_null_without_tool_ratio": (
+                    sum(1 for row in subset if row["terminal_false_null_without_tool"]) / subset_count
+                ),
+            }
+        return payload
+
+    return {
+        "dataset_path": str(Path(dataset_path).resolve()),
+        "dataset_format": dataset_format,
+        "pz_cr_record_count": pz_cr_record_count,
+        "first_assistant_tool_call_count": first_assistant_tool_call_count,
+        "first_assistant_final_answer_count": first_assistant_final_answer_count,
+        "tool_first_ratio": first_assistant_tool_call_count / pz_cr_record_count,
+        "zero_tool_terminal_ratio": zero_tool_terminal_count / pz_cr_record_count,
+        "terminal_false_null_without_tool_ratio": false_null_count / pz_cr_record_count,
+        "per_dataset": _group(behavior_rows, key="dataset"),
+        "per_category": _group(behavior_rows, key="category"),
+    }
+
+
+def main() -> int:
+    """Run the lightweight train-side behavior audit from the CLI."""
+
+    parser = argparse.ArgumentParser(description="Audit tool-first vs zero-tool behavior in exported SFT datasets.")
+    parser.add_argument("--dataset", required=True, help="Path to a canonical or MS-Swift JSONL dataset.")
+    parser.add_argument("--output", required=True, help="Where to write the JSON audit summary.")
+    parser.add_argument(
+        "--format",
+        default="auto",
+        choices=["auto", "canonical", "ms_swift"],
+        help="Dataset row format. Defaults to auto-detect.",
+    )
+    args = parser.parse_args()
+
+    summary = audit_train_side_dataset(args.dataset, dataset_format=args.format)
+    write_json(args.output, summary)
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

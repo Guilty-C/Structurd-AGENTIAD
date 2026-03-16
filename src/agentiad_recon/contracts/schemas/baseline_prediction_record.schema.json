@@ -25,6 +25,13 @@
     "raw_output_path",
     "raw_output_sha256",
     "trace_path",
+    "first_protocol_event_type",
+    "first_assistant_output_terminal",
+    "tool_call_count",
+    "called_tools",
+    "terminal_without_tool_call",
+    "terminal_false_null_without_tool_call",
+    "terminal_answer_turn_index",
     "metadata"
   ],
   "properties": {
@@ -67,6 +74,19 @@
     "raw_output_path": { "type": "string", "minLength": 1 },
     "raw_output_sha256": { "type": "string", "minLength": 1 },
     "trace_path": { "type": "string", "minLength": 1 },
+    "first_protocol_event_type": {
+      "type": "string",
+      "enum": ["final_answer", "tool_call", "parse_failure", "runtime_fail_before_generation", "unknown"]
+    },
+    "first_assistant_output_terminal": { "type": "boolean" },
+    "tool_call_count": { "type": "integer", "minimum": 0 },
+    "called_tools": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["PZ", "CR"] }
+    },
+    "terminal_without_tool_call": { "type": "boolean" },
+    "terminal_false_null_without_tool_call": { "type": "boolean" },
+    "terminal_answer_turn_index": { "type": ["integer", "null"], "minimum": 0 },
     "metadata": {
       "type": "object",
       "additionalProperties": true

@@ -24,6 +24,11 @@ from agentiad_recon.backends import (
     TransformersVisionLanguageBackend,
     VLLMBackendAdapter,
 )
+from agentiad_recon.behavior_audit import (
+    build_zero_tool_behavior_fields,
+    summarize_zero_tool_behavior,
+    write_zero_tool_behavior_sidecars,
+)
 from agentiad_recon.contracts import validate_payload
 from agentiad_recon.evaluation import (
     build_delta_report,
@@ -697,14 +702,26 @@ def run_baseline(
             schema_valid = False
             error_message: str | None = None
             failure_reason: str | None = None
+            first_protocol_event_type = "unknown"
+            terminal_answer_present = False
+            terminal_answer_turn_index: int | None = None
             _append_reasoning(history, response.raw_output, backend_name=response.backend_name)
             try:
                 prediction = parse_final_answer(response.raw_output)
                 parser_valid = True
                 schema_valid = True
+                first_protocol_event_type = "final_answer"
+                terminal_answer_present = True
+                terminal_answer_turn_index = 0
             except Exception as exc:  # noqa: BLE001 - gate needs explicit failures.
                 error_message = str(exc)
                 failure_reason = _failure_reason("parser_invalid", str(exc))
+                if "<answer>" in response.raw_output or "<final_answer>" in response.raw_output:
+                    first_protocol_event_type = "final_answer"
+                    terminal_answer_present = True
+                    terminal_answer_turn_index = 0
+                else:
+                    first_protocol_event_type = "parse_failure"
             failure_reason = _resolve_failure_reason(
                 prediction=prediction,
                 parser_valid=parser_valid,
@@ -765,6 +782,13 @@ def run_baseline(
                         backend,
                     ),
                 },
+                **build_zero_tool_behavior_fields(
+                    first_protocol_event_type=first_protocol_event_type,
+                    called_tools=[],
+                    terminal_answer_present=terminal_answer_present,
+                    terminal_answer_turn_index=terminal_answer_turn_index,
+                    prediction=prediction,
+                ),
             )
             prediction_path = directories["predictions"] / f"seed_{seed}" / f"{sample_slug}.json"
             write_json(prediction_path, record)
@@ -906,6 +930,9 @@ def _tool_loop_sample(
     last_raw_output_path: Path | None = None
     normalization_events: list[dict[str, Any]] = []
     normalization_event_paths: list[str] = []
+    first_protocol_event_type = "unknown"
+    terminal_answer_present = False
+    terminal_answer_turn_index: int | None = None
     prompt_audit_path = _prompt_audit_sidecar_path(directories["raw_outputs"], seed=seed, sample_slug=sample_slug)
     prompt_audit = _prompt_audit_payload(
         prompt_bundle,
@@ -918,6 +945,7 @@ def _tool_loop_sample(
 
     if prompt_audit["mode_contract_mismatch"]:
         failure_reason = prompt_audit["mismatch_reasons"][0]
+        first_protocol_event_type = "runtime_fail_before_generation"
         error_message = (
             "Prompt audit mismatch before backend.generate(): "
             + ", ".join(prompt_audit["mismatch_reasons"])
@@ -969,6 +997,13 @@ def _tool_loop_sample(
         _append_reasoning(history, response.raw_output, backend_name=response.backend_name)
         decision = normalize_protocol_turn(response.raw_output, tool_path=definition["mode"])
         event = decision.event_type
+        if turn_index == 0:
+            if event == "tool_call":
+                first_protocol_event_type = "tool_call"
+            elif event == "final_answer":
+                first_protocol_event_type = "final_answer"
+            else:
+                first_protocol_event_type = "parse_failure"
         normalization_metadata: dict[str, Any] | None = None
         if decision.normalization_applied:
             sidecar_path = _normalization_sidecar_path(raw_output_path)
@@ -1048,6 +1083,8 @@ def _tool_loop_sample(
             continue
 
         if event == "final_answer":
+            terminal_answer_present = True
+            terminal_answer_turn_index = turn_index
             try:
                 prediction = parse_final_answer(response.raw_output)
                 parser_valid = True
@@ -1153,6 +1190,13 @@ def _tool_loop_sample(
                 backend,
             ),
         },
+        **build_zero_tool_behavior_fields(
+            first_protocol_event_type=first_protocol_event_type,
+            called_tools=[trace["tool_name"] for trace in tool_traces],
+            terminal_answer_present=terminal_answer_present,
+            terminal_answer_turn_index=terminal_answer_turn_index,
+            prediction=prediction,
+        ),
     )
     prediction_path = directories["predictions"] / f"seed_{seed}" / f"{sample_slug}.json"
     write_json(prediction_path, record)
@@ -1203,6 +1247,11 @@ def run_tool_augmented(
     runtime_provenance = _resolved_runtime_provenance(definition, runtime_config, backend)
     normalization_summary = _normalization_summary(prediction_records)
     prompt_audit_summary = _prompt_audit_summary(prediction_records)
+    zero_tool_behavior_summary = summarize_zero_tool_behavior(prediction_records)
+    zero_tool_sidecars = write_zero_tool_behavior_sidecars(
+        prediction_records=prediction_records,
+        metrics_dir=directories["metrics"],
+    )
     metrics_report = build_metrics_report(
         run_id=definition["run_id"],
         tool_mode=definition["mode"],
@@ -1213,6 +1262,7 @@ def run_tool_augmented(
         seeds=definition["seeds"],
         runtime_provenance=runtime_provenance,
         prompt_audit_summary=prompt_audit_summary,
+        zero_tool_behavior_summary=zero_tool_behavior_summary,
     )
     metrics_report_path = directories["metrics"] / "metrics_report.json"
     per_seed_metrics_path = directories["metrics"] / "per_seed_metrics.json"
@@ -1282,10 +1332,13 @@ def run_tool_augmented(
             "run_metadata": str(run_metadata_path.resolve()),
             "run_manifest": str((directories["root"] / "run_manifest.json").resolve()),
             "delta_report": str(delta_report_path.resolve()),
+            "per_dataset_zero_tool_behavior": zero_tool_sidecars["per_dataset_zero_tool_behavior"],
+            "per_category_zero_tool_behavior": zero_tool_sidecars["per_category_zero_tool_behavior"],
         },
         notes=definition.get("notes", []),
         normalization_summary=normalization_summary,
         prompt_audit_summary=prompt_audit_summary,
+        zero_tool_behavior_summary=zero_tool_behavior_summary,
     )
     summary_path = directories["root"] / "run_summary.json"
     write_json(summary_path, summary)
@@ -1306,6 +1359,7 @@ def run_tool_augmented(
         "run_provenance": runtime_provenance,
         "normalization_summary": normalization_summary,
         "prompt_audit_summary": prompt_audit_summary,
+        "zero_tool_behavior_summary": zero_tool_behavior_summary,
         "notes": [
             "Tool-augmented inference summary manifest.",
             (

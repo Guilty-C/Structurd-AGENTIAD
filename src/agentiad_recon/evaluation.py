@@ -78,6 +78,13 @@ def build_prediction_record(
     raw_output_path: str,
     raw_output_sha256: str,
     trace_path: str,
+    first_protocol_event_type: str,
+    first_assistant_output_terminal: bool,
+    tool_call_count: int,
+    called_tools: list[str],
+    terminal_without_tool_call: bool,
+    terminal_false_null_without_tool_call: bool,
+    terminal_answer_turn_index: int | None,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
     """Build and validate one per-sample prediction record."""
@@ -103,6 +110,13 @@ def build_prediction_record(
         "raw_output_path": raw_output_path,
         "raw_output_sha256": raw_output_sha256,
         "trace_path": trace_path,
+        "first_protocol_event_type": first_protocol_event_type,
+        "first_assistant_output_terminal": first_assistant_output_terminal,
+        "tool_call_count": tool_call_count,
+        "called_tools": called_tools,
+        "terminal_without_tool_call": terminal_without_tool_call,
+        "terminal_false_null_without_tool_call": terminal_false_null_without_tool_call,
+        "terminal_answer_turn_index": terminal_answer_turn_index,
         "metadata": metadata,
     }
     validate_payload(record, "baseline_prediction_record.schema.json")
@@ -185,6 +199,7 @@ def build_metrics_report(
     seeds: list[int],
     runtime_provenance: dict[str, Any],
     prompt_audit_summary: dict[str, int] | None = None,
+    zero_tool_behavior_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-seed, per-class, and mean/std inference metrics."""
 
@@ -254,6 +269,8 @@ def build_metrics_report(
     }
     if prompt_audit_summary is not None:
         report["prompt_audit_summary"] = prompt_audit_summary
+    if zero_tool_behavior_summary is not None:
+        report["zero_tool_behavior_summary"] = zero_tool_behavior_summary
     validate_payload(report, "baseline_metrics_report.schema.json")
     return report
 
@@ -288,6 +305,7 @@ def build_run_summary(
     notes: list[str] | None = None,
     normalization_summary: dict[str, int] | None = None,
     prompt_audit_summary: dict[str, int] | None = None,
+    zero_tool_behavior_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one compact summary manifest for the evidence package."""
 
@@ -328,6 +346,8 @@ def build_run_summary(
         summary["normalization_summary"] = normalization_summary
     if prompt_audit_summary is not None:
         summary["prompt_audit_summary"] = prompt_audit_summary
+    if zero_tool_behavior_summary is not None:
+        summary["zero_tool_behavior_summary"] = zero_tool_behavior_summary
     validate_payload(summary, "baseline_run_summary.schema.json")
     return summary
 
