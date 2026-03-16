@@ -183,10 +183,280 @@ class ProtocolDecision:
         return payload
 
 
+@dataclass(frozen=True)
+class RetryToolCallRepairDecision:
+    """Structured outcome for bounded retry-only tool-call repair attempts."""
+
+    attempted: bool
+    succeeded: bool
+    original_text: str
+    original_failure_family: str
+    repaired_text: str | None = None
+    repair_categories: tuple[str, ...] = ()
+    wrapper_recovery_applied: bool = False
+    quote_normalization_applied: bool = False
+    alias_canonicalization_applied: bool = False
+    bbox_canonicalization_applied: bool = False
+    selected_tool_name: str | None = None
+    selected_canonical_arguments: dict[str, Any] | None = None
+    parsed_call: ParsedToolCall | None = None
+    error: str | None = None
+
+    def to_audit_payload(self) -> dict[str, Any]:
+        """Convert one retry repair decision into an auditable sidecar fragment."""
+
+        return {
+            "repair_attempted": self.attempted,
+            "repair_succeeded": self.succeeded,
+            "original_failure_family": self.original_failure_family,
+            "original_text": self.original_text,
+            "repaired_text": self.repaired_text,
+            "repair_categories": list(self.repair_categories),
+            "wrapper_recovery_applied": self.wrapper_recovery_applied,
+            "quote_normalization_applied": self.quote_normalization_applied,
+            "alias_canonicalization_applied": self.alias_canonicalization_applied,
+            "bbox_canonicalization_applied": self.bbox_canonicalization_applied,
+            "selected_tool_name": self.selected_tool_name,
+            "selected_canonical_arguments": self.selected_canonical_arguments,
+            "error": self.error,
+        }
+
+
 def _has_final_answer_block(text: str) -> bool:
     """Return whether assistant text contains a final-answer wrapper."""
 
     return "<final_answer>" in text or "<answer>" in text
+
+
+def _normalize_retry_repair_text(text: str) -> tuple[str, bool]:
+    """Normalize obvious Unicode quote/punctuation corruption for retry-only repair."""
+
+    translation = str.maketrans(
+        {
+            "“": '"',
+            "”": '"',
+            "„": '"',
+            "‟": '"',
+            "＂": '"',
+            "‘": "'",
+            "’": "'",
+            "‚": "'",
+            "‛": "'",
+            "：": ":",
+            "，": ",",
+        }
+    )
+    normalized = text.translate(translation)
+    normalized = re.sub(
+        r'([{\[,]\s*)["\']?([A-Za-z_][A-Za-z0-9_]*)["\']?\s*:',
+        r'\1"\2":',
+        normalized,
+    )
+    return normalized, normalized != text
+
+
+def _extract_json_objects(text: str) -> list[str]:
+    """Extract balanced top-level JSON object candidates from free-form text."""
+
+    objects: list[str] = []
+    depth = 0
+    start: int | None = None
+    in_string = False
+    escape = False
+    for index, char in enumerate(text):
+        if escape:
+            escape = False
+            continue
+        if char == "\\" and in_string:
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}":
+            if depth == 0:
+                continue
+            depth -= 1
+            if depth == 0 and start is not None:
+                objects.append(text[start : index + 1])
+                start = None
+    return objects
+
+
+def _canonical_bbox_mapping(payload: Any) -> tuple[dict[str, float] | None, bool]:
+    """Return a canonical bbox mapping when the source intent is explicit and complete."""
+
+    bbox_canonicalization_applied = False
+    bbox_mapping: dict[str, Any] | None = None
+
+    if isinstance(payload, dict):
+        if isinstance(payload.get("bbox"), dict):
+            bbox_mapping = payload["bbox"]
+        elif isinstance(payload.get("bbox"), list) and len(payload["bbox"]) == 4:
+            values = payload["bbox"]
+            bbox_mapping = {"x0": values[0], "y0": values[1], "x1": values[2], "y1": values[3]}
+            bbox_canonicalization_applied = True
+        elif all(key in payload for key in ("x0", "y0", "x1", "y1")):
+            bbox_mapping = {key: payload[key] for key in ("x0", "y0", "x1", "y1")}
+            bbox_canonicalization_applied = True
+
+    if bbox_mapping is None:
+        return None, False
+    return NormalizedBBox.from_mapping(bbox_mapping).to_mapping(), bbox_canonicalization_applied
+
+
+def _canonicalize_retry_crop_payload(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], bool, bool]:
+    """Canonicalize one explicit crop-intent payload into the strict PZ contract."""
+
+    alias_canonicalization_applied = False
+    bbox_canonicalization_applied = False
+    raw_tool_name = payload.get("tool_name")
+    normalized_tool_name = None if raw_tool_name is None else str(raw_tool_name).strip().lower()
+    arguments = payload.get("arguments")
+    candidate_payload = arguments if isinstance(arguments, dict) else payload
+
+    canonical_bbox, bbox_changed = _canonical_bbox_mapping(candidate_payload)
+    bbox_canonicalization_applied = bbox_changed
+    if canonical_bbox is None:
+        raise ToolContractError("Retry repair requires an explicit bbox payload")
+
+    allowed_aliases = {"pz", "crop_image_normalized", "pz_cr"}
+    if normalized_tool_name in {None, "pz"}:
+        canonical_tool_name = "PZ"
+    elif normalized_tool_name in allowed_aliases:
+        canonical_tool_name = "PZ"
+        alias_canonicalization_applied = True
+    elif normalized_tool_name == "cr":
+        raise ToolContractError("Retry repair must not fabricate CR calls")
+    elif normalized_tool_name == "p z":
+        canonical_tool_name = "PZ"
+        alias_canonicalization_applied = True
+    else:
+        raise ToolContractError(f"Retry repair does not allow tool_name={raw_tool_name!r}")
+
+    canonical_payload: dict[str, Any] = {
+        "tool_name": canonical_tool_name,
+        "arguments": {"bbox": canonical_bbox},
+    }
+    if isinstance(payload.get("call_id"), str) and payload["call_id"].strip():
+        canonical_payload["call_id"] = payload["call_id"].strip()
+    return canonical_payload, alias_canonicalization_applied, bbox_canonicalization_applied
+
+
+def repair_retry_tool_call_output(text: str, *, tool_path: str) -> RetryToolCallRepairDecision:
+    """Attempt a bounded retry-only repair for unambiguous malformed PZ-intent outputs."""
+
+    if tool_path != "pz_cr":
+        return RetryToolCallRepairDecision(
+            attempted=False,
+            succeeded=False,
+            original_text=text,
+            original_failure_family="runtime_exception:first_turn_gate_retry_missing_contract_block",
+            error="Retry repair is only available for pz_cr gate retries",
+        )
+
+    normalized_text, quote_normalization_applied = _normalize_retry_repair_text(text)
+    wrapped_matches = re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", normalized_text, flags=re.DOTALL)
+    wrapper_recovery_applied = False
+    if wrapped_matches:
+        if len(wrapped_matches) != 1:
+            return RetryToolCallRepairDecision(
+                attempted=True,
+                succeeded=False,
+                original_text=text,
+                original_failure_family="runtime_exception:first_turn_gate_retry_missing_contract_block",
+                quote_normalization_applied=quote_normalization_applied,
+                error="Retry repair requires exactly one wrapped tool_call candidate",
+            )
+        candidate_text = wrapped_matches[0]
+    else:
+        candidates = _extract_json_objects(normalized_text)
+        if len(candidates) != 1:
+            return RetryToolCallRepairDecision(
+                attempted=True,
+                succeeded=False,
+                original_text=text,
+                original_failure_family="runtime_exception:first_turn_gate_retry_missing_contract_block",
+                quote_normalization_applied=quote_normalization_applied,
+                error="Retry repair requires exactly one bare JSON object candidate",
+            )
+        candidate_text = candidates[0]
+        wrapper_recovery_applied = True
+
+    try:
+        payload = json.loads(candidate_text)
+    except json.JSONDecodeError as exc:
+        return RetryToolCallRepairDecision(
+            attempted=True,
+            succeeded=False,
+            original_text=text,
+            original_failure_family="runtime_exception:first_turn_gate_retry_missing_contract_block",
+            quote_normalization_applied=quote_normalization_applied,
+            wrapper_recovery_applied=wrapper_recovery_applied,
+            error=f"Retry repair could not parse candidate JSON: {exc}",
+        )
+
+    if not isinstance(payload, dict):
+        return RetryToolCallRepairDecision(
+            attempted=True,
+            succeeded=False,
+            original_text=text,
+            original_failure_family="runtime_exception:first_turn_gate_retry_missing_contract_block",
+            quote_normalization_applied=quote_normalization_applied,
+            wrapper_recovery_applied=wrapper_recovery_applied,
+            error="Retry repair candidate must be a JSON object",
+        )
+
+    try:
+        canonical_payload, alias_canonicalization_applied, bbox_canonicalization_applied = (
+            _canonicalize_retry_crop_payload(payload)
+        )
+        repaired_text = f"<tool_call>{json.dumps(canonical_payload, sort_keys=True)}</tool_call>"
+        parsed_call = parse_tool_call(repaired_text, tool_path=tool_path)
+    except ToolContractError as exc:
+        return RetryToolCallRepairDecision(
+            attempted=True,
+            succeeded=False,
+            original_text=text,
+            original_failure_family="runtime_exception:first_turn_gate_retry_missing_contract_block",
+            quote_normalization_applied=quote_normalization_applied,
+            wrapper_recovery_applied=wrapper_recovery_applied,
+            error=str(exc),
+        )
+
+    categories: list[str] = []
+    if wrapper_recovery_applied:
+        categories.append("wrapper_recovery")
+    if quote_normalization_applied:
+        categories.append("quote_normalization")
+    if alias_canonicalization_applied:
+        categories.append("alias_canonicalization")
+    if bbox_canonicalization_applied:
+        categories.append("bbox_canonicalization")
+
+    return RetryToolCallRepairDecision(
+        attempted=True,
+        succeeded=True,
+        original_text=text,
+        original_failure_family="runtime_exception:first_turn_gate_retry_missing_contract_block",
+        repaired_text=repaired_text,
+        repair_categories=tuple(categories),
+        wrapper_recovery_applied=wrapper_recovery_applied,
+        quote_normalization_applied=quote_normalization_applied,
+        alias_canonicalization_applied=alias_canonicalization_applied,
+        bbox_canonicalization_applied=bbox_canonicalization_applied,
+        selected_tool_name=parsed_call.tool_name,
+        selected_canonical_arguments=parsed_call.arguments,
+        parsed_call=parsed_call,
+    )
 
 
 def _parse_tool_call_block(raw_block: str, *, tool_path: str) -> ParsedToolCall:

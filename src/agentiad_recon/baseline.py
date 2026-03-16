@@ -59,6 +59,7 @@ from agentiad_recon.tooling import (
     execute_tool_call,
     normalize_protocol_turn,
     parse_tool_call,
+    repair_retry_tool_call_output,
     reinsert_tool_result,
 )
 from agentiad_recon.traces import TraceMessage, TraceRecord
@@ -678,6 +679,39 @@ def _first_turn_gate_summary(prediction_records: list[dict[str, Any]]) -> dict[s
     }
 
 
+def _first_turn_gate_repair_summary(prediction_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate retry-only repair outcomes for first-turn gate parse failures."""
+
+    attempt_count = sum(1 for record in prediction_records if record["first_turn_gate_repair_attempted"])
+    success_count = sum(1 for record in prediction_records if record["first_turn_gate_repair_succeeded"])
+    failure_count = attempt_count - success_count
+    return {
+        "first_turn_gate_repair_attempt_count": attempt_count,
+        "first_turn_gate_repair_success_count": success_count,
+        "first_turn_gate_repair_failure_count": failure_count,
+        "first_turn_gate_repair_wrapper_recovery_count": sum(
+            1
+            for record in prediction_records
+            if "wrapper_recovery" in record["first_turn_gate_repair_categories"]
+        ),
+        "first_turn_gate_repair_quote_normalization_count": sum(
+            1
+            for record in prediction_records
+            if "quote_normalization" in record["first_turn_gate_repair_categories"]
+        ),
+        "first_turn_gate_repair_alias_canonicalization_count": sum(
+            1
+            for record in prediction_records
+            if "alias_canonicalization" in record["first_turn_gate_repair_categories"]
+        ),
+        "first_turn_gate_repair_bbox_canonicalization_count": sum(
+            1
+            for record in prediction_records
+            if "bbox_canonicalization" in record["first_turn_gate_repair_categories"]
+        ),
+    }
+
+
 def _artifact_dirs(definition: dict[str, Any], root: Path) -> dict[str, Path]:
     """Resolve and create the standard artifact directories for one run."""
 
@@ -900,6 +934,10 @@ def run_baseline(
                 first_turn_gate_retry_count=0,
                 first_turn_gate_recovered=False,
                 first_turn_gate_outcome="not_triggered",
+                first_turn_gate_repair_attempted=False,
+                first_turn_gate_repair_succeeded=False,
+                first_turn_gate_repair_outcome="not_attempted",
+                first_turn_gate_repair_categories=[],
                 first_turn_gate_sidecar_path=None,
                 metadata={
                     "backend_metadata": response.metadata,
@@ -1070,6 +1108,10 @@ def _tool_loop_sample(
     first_turn_gate_retry_count = 0
     first_turn_gate_recovered = False
     first_turn_gate_outcome = "not_triggered"
+    first_turn_gate_repair_attempted = False
+    first_turn_gate_repair_succeeded = False
+    first_turn_gate_repair_outcome = "not_attempted"
+    first_turn_gate_repair_categories: list[str] = []
     first_turn_gate_sidecar: dict[str, Any] | None = None
     first_turn_gate_sidecar_path: Path | None = None
     prompt_audit_path = _prompt_audit_sidecar_path(directories["raw_outputs"], seed=seed, sample_slug=sample_slug)
@@ -1253,6 +1295,21 @@ def _tool_loop_sample(
                 "retry_count": 1,
                 "retry_raw_output_path": str(retry_raw_output_path.resolve()),
                 "final_gate_outcome": "retry_parse_failure",
+                "retry_repair": {
+                    "repair_attempted": False,
+                    "repair_succeeded": False,
+                    "original_failure_family": "runtime_exception:first_turn_gate_retry_missing_contract_block",
+                    "original_text": retry_response.raw_output,
+                    "repaired_text": None,
+                    "repair_categories": [],
+                    "wrapper_recovery_applied": False,
+                    "quote_normalization_applied": False,
+                    "alias_canonicalization_applied": False,
+                    "bbox_canonicalization_applied": False,
+                    "selected_tool_name": None,
+                    "selected_canonical_arguments": None,
+                    "error": None,
+                },
             }
             if retry_event == "tool_call":
                 first_turn_gate_recovered = True
@@ -1287,8 +1344,51 @@ def _tool_loop_sample(
                 )
                 break
             else:
-                error_message = "First-turn gate retry did not contain a valid tool call or final answer block"
-                failure_reason = "runtime_exception:first_turn_gate_retry_missing_contract_block"
+                repair_decision = repair_retry_tool_call_output(
+                    retry_response.raw_output,
+                    tool_path=definition["mode"],
+                )
+                first_turn_gate_repair_attempted = repair_decision.attempted
+                first_turn_gate_repair_succeeded = repair_decision.succeeded
+                first_turn_gate_repair_outcome = (
+                    "repaired_to_tool_call" if repair_decision.succeeded else "repair_failed"
+                )
+                first_turn_gate_repair_categories = list(repair_decision.repair_categories)
+                first_turn_gate_sidecar["retry_repair"] = repair_decision.to_audit_payload()
+                if repair_decision.succeeded and repair_decision.parsed_call is not None:
+                    first_turn_gate_recovered = True
+                    first_turn_gate_outcome = "recovered_to_tool_call"
+                    first_turn_gate_sidecar["final_gate_outcome"] = first_turn_gate_outcome
+                    write_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
+                    _append_tool_request(
+                        history,
+                        retry_response.raw_output,
+                        backend_name=retry_response.backend_name,
+                        raw_output_path=str(retry_raw_output_path.resolve()),
+                        tool_name=repair_decision.parsed_call.tool_name,
+                        call_id=repair_decision.parsed_call.call_id,
+                        extra_metadata={
+                            **(retry_normalization_metadata or {}),
+                            "retry_repair_applied": True,
+                            "retry_repair_succeeded": True,
+                            "retry_repair_categories": list(repair_decision.repair_categories),
+                        },
+                    )
+                    tool_result = execute_tool_call(
+                        repair_decision.parsed_call,
+                        sample=sample,
+                        sample_pool=sample_pool,
+                        artifact_dir=directories["raw_outputs"] / f"seed_{seed}" / sample_slug / "tool_artifacts",
+                    )
+                    tool_payload = tool_result.to_payload()
+                    tool_traces.append(tool_payload)
+                    history = reinsert_tool_result(history, tool_result)
+                    continue
+
+                error_message = repair_decision.error or (
+                    "First-turn gate retry did not contain a valid tool call or final answer block"
+                )
+                failure_reason = "runtime_exception:first_turn_gate_retry_repair_failed"
                 first_turn_gate_outcome = "retry_parse_failure"
                 first_turn_gate_sidecar["final_gate_outcome"] = first_turn_gate_outcome
                 write_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
@@ -1424,6 +1524,10 @@ def _tool_loop_sample(
             "first_turn_gate_retry_count": first_turn_gate_retry_count,
             "first_turn_gate_recovered": first_turn_gate_recovered,
             "first_turn_gate_outcome": first_turn_gate_outcome,
+            "first_turn_gate_repair_attempted": first_turn_gate_repair_attempted,
+            "first_turn_gate_repair_succeeded": first_turn_gate_repair_succeeded,
+            "first_turn_gate_repair_outcome": first_turn_gate_repair_outcome,
+            "first_turn_gate_repair_categories": first_turn_gate_repair_categories,
             "first_turn_gate_sidecar_path": (
                 str(first_turn_gate_sidecar_path.resolve()) if first_turn_gate_sidecar_path is not None else None
             ),
@@ -1457,6 +1561,10 @@ def _tool_loop_sample(
         first_turn_gate_retry_count=first_turn_gate_retry_count,
         first_turn_gate_recovered=first_turn_gate_recovered,
         first_turn_gate_outcome=first_turn_gate_outcome,
+        first_turn_gate_repair_attempted=first_turn_gate_repair_attempted,
+        first_turn_gate_repair_succeeded=first_turn_gate_repair_succeeded,
+        first_turn_gate_repair_outcome=first_turn_gate_repair_outcome,
+        first_turn_gate_repair_categories=first_turn_gate_repair_categories,
         first_turn_gate_sidecar_path=(
             str(first_turn_gate_sidecar_path.resolve()) if first_turn_gate_sidecar_path is not None else None
         ),
@@ -1479,6 +1587,10 @@ def _tool_loop_sample(
             "first_turn_gate_retry_count": first_turn_gate_retry_count,
             "first_turn_gate_recovered": first_turn_gate_recovered,
             "first_turn_gate_outcome": first_turn_gate_outcome,
+            "first_turn_gate_repair_attempted": first_turn_gate_repair_attempted,
+            "first_turn_gate_repair_succeeded": first_turn_gate_repair_succeeded,
+            "first_turn_gate_repair_outcome": first_turn_gate_repair_outcome,
+            "first_turn_gate_repair_categories": first_turn_gate_repair_categories,
             "first_turn_gate_sidecar_path": (
                 str(first_turn_gate_sidecar_path.resolve()) if first_turn_gate_sidecar_path is not None else None
             ),
@@ -1548,6 +1660,7 @@ def run_tool_augmented(
     prompt_audit_summary = _prompt_audit_summary(prediction_records)
     zero_tool_behavior_summary = summarize_zero_tool_behavior(prediction_records)
     first_turn_gate_summary = _first_turn_gate_summary(prediction_records)
+    first_turn_gate_repair_summary = _first_turn_gate_repair_summary(prediction_records)
     zero_tool_sidecars = write_zero_tool_behavior_sidecars(
         prediction_records=prediction_records,
         metrics_dir=directories["metrics"],
@@ -1566,6 +1679,7 @@ def run_tool_augmented(
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
         first_turn_gate_summary=first_turn_gate_summary,
+        first_turn_gate_repair_summary=first_turn_gate_repair_summary,
     )
     metrics_report_path = directories["metrics"] / "metrics_report.json"
     per_seed_metrics_path = directories["metrics"] / "per_seed_metrics.json"
@@ -1654,6 +1768,7 @@ def run_tool_augmented(
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
         first_turn_gate_summary=first_turn_gate_summary,
+        first_turn_gate_repair_summary=first_turn_gate_repair_summary,
     )
     summary_path = directories["root"] / "run_summary.json"
     write_json(summary_path, summary)
@@ -1678,6 +1793,7 @@ def run_tool_augmented(
         "prompt_audit_summary": prompt_audit_summary,
         "zero_tool_behavior_summary": zero_tool_behavior_summary,
         "first_turn_gate_summary": first_turn_gate_summary,
+        "first_turn_gate_repair_summary": first_turn_gate_repair_summary,
         "notes": [
             "Tool-augmented inference summary manifest.",
             (

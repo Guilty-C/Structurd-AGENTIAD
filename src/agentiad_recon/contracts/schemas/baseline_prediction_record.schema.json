@@ -30,6 +30,10 @@
     "first_turn_gate_retry_count",
     "first_turn_gate_recovered",
     "first_turn_gate_outcome",
+    "first_turn_gate_repair_attempted",
+    "first_turn_gate_repair_succeeded",
+    "first_turn_gate_repair_outcome",
+    "first_turn_gate_repair_categories",
     "first_turn_gate_sidecar_path",
     "first_protocol_event_type",
     "first_assistant_output_terminal",
@@ -95,6 +99,24 @@
         "still_terminal_after_retry",
         "retry_parse_failure"
       ]
+    },
+    "first_turn_gate_repair_attempted": { "type": "boolean" },
+    "first_turn_gate_repair_succeeded": { "type": "boolean" },
+    "first_turn_gate_repair_outcome": {
+      "type": "string",
+      "enum": ["not_attempted", "repaired_to_tool_call", "repair_failed"]
+    },
+    "first_turn_gate_repair_categories": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "wrapper_recovery",
+          "quote_normalization",
+          "alias_canonicalization",
+          "bbox_canonicalization"
+        ]
+      }
     },
     "first_turn_gate_sidecar_path": {
       "type": ["string", "null"]

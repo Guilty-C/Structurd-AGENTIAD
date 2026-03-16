@@ -209,6 +209,28 @@
         "first_turn_gate_recovery_rate": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
+    "first_turn_gate_repair_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "first_turn_gate_repair_attempt_count",
+        "first_turn_gate_repair_success_count",
+        "first_turn_gate_repair_failure_count",
+        "first_turn_gate_repair_wrapper_recovery_count",
+        "first_turn_gate_repair_quote_normalization_count",
+        "first_turn_gate_repair_alias_canonicalization_count",
+        "first_turn_gate_repair_bbox_canonicalization_count"
+      ],
+      "properties": {
+        "first_turn_gate_repair_attempt_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_repair_success_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_repair_failure_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_repair_wrapper_recovery_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_repair_quote_normalization_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_repair_alias_canonicalization_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_repair_bbox_canonicalization_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "notes": {
       "type": "array",
       "items": {

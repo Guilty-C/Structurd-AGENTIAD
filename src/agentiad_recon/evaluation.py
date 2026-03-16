@@ -83,6 +83,10 @@ def build_prediction_record(
     first_turn_gate_retry_count: int,
     first_turn_gate_recovered: bool,
     first_turn_gate_outcome: str,
+    first_turn_gate_repair_attempted: bool,
+    first_turn_gate_repair_succeeded: bool,
+    first_turn_gate_repair_outcome: str,
+    first_turn_gate_repair_categories: list[str],
     first_turn_gate_sidecar_path: str | None,
     first_protocol_event_type: str,
     first_assistant_output_terminal: bool,
@@ -121,6 +125,10 @@ def build_prediction_record(
         "first_turn_gate_retry_count": first_turn_gate_retry_count,
         "first_turn_gate_recovered": first_turn_gate_recovered,
         "first_turn_gate_outcome": first_turn_gate_outcome,
+        "first_turn_gate_repair_attempted": first_turn_gate_repair_attempted,
+        "first_turn_gate_repair_succeeded": first_turn_gate_repair_succeeded,
+        "first_turn_gate_repair_outcome": first_turn_gate_repair_outcome,
+        "first_turn_gate_repair_categories": first_turn_gate_repair_categories,
         "first_turn_gate_sidecar_path": first_turn_gate_sidecar_path,
         "first_protocol_event_type": first_protocol_event_type,
         "first_assistant_output_terminal": first_assistant_output_terminal,
@@ -215,6 +223,7 @@ def build_metrics_report(
     prompt_audit_summary: dict[str, int] | None = None,
     zero_tool_behavior_summary: dict[str, Any] | None = None,
     first_turn_gate_summary: dict[str, Any] | None = None,
+    first_turn_gate_repair_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-seed, per-class, and mean/std inference metrics."""
 
@@ -292,6 +301,8 @@ def build_metrics_report(
         report["zero_tool_behavior_summary"] = zero_tool_behavior_summary
     if first_turn_gate_summary is not None:
         report["first_turn_gate_summary"] = first_turn_gate_summary
+    if first_turn_gate_repair_summary is not None:
+        report["first_turn_gate_repair_summary"] = first_turn_gate_repair_summary
     validate_payload(report, "baseline_metrics_report.schema.json")
     return report
 
@@ -330,6 +341,7 @@ def build_run_summary(
     prompt_audit_summary: dict[str, int] | None = None,
     zero_tool_behavior_summary: dict[str, Any] | None = None,
     first_turn_gate_summary: dict[str, Any] | None = None,
+    first_turn_gate_repair_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one compact summary manifest for the evidence package."""
 
@@ -378,6 +390,8 @@ def build_run_summary(
         summary["zero_tool_behavior_summary"] = zero_tool_behavior_summary
     if first_turn_gate_summary is not None:
         summary["first_turn_gate_summary"] = first_turn_gate_summary
+    if first_turn_gate_repair_summary is not None:
+        summary["first_turn_gate_repair_summary"] = first_turn_gate_repair_summary
     validate_payload(summary, "baseline_run_summary.schema.json")
     return summary
 
