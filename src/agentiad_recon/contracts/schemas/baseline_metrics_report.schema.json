@@ -40,6 +40,10 @@
       "type": "string",
       "enum": ["baseline", "tool_first_nudge", "tool_first_strict"]
     },
+    "first_turn_protocol_gate_mode": {
+      "type": "string",
+      "enum": ["off", "retry_once_pz_cr"]
+    },
     "prompt_audit_summary": {
       "type": "object",
       "additionalProperties": false,
@@ -80,6 +84,26 @@
         "zero_tool_terminal_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
         "zero_tool_terminal_false_null_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
         "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "first_turn_gate_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "first_turn_gate_trigger_count",
+        "samples_with_first_turn_gate_events",
+        "first_turn_gate_recovered_to_tool_call_count",
+        "first_turn_gate_still_terminal_count",
+        "first_turn_gate_retry_parse_failure_count",
+        "first_turn_gate_recovery_rate"
+      ],
+      "properties": {
+        "first_turn_gate_trigger_count": { "type": "integer", "minimum": 0 },
+        "samples_with_first_turn_gate_events": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_recovered_to_tool_call_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_still_terminal_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_retry_parse_failure_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_recovery_rate": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
     "runtime_provenance": {
@@ -219,7 +243,8 @@
         "trust_remote_code",
         "dtype",
         "device",
-        "tool_first_intervention_strategy"
+        "tool_first_intervention_strategy",
+        "first_turn_protocol_gate_mode"
       ],
       "properties": {
         "runtime_backend_name": { "type": "string", "minLength": 1 },
@@ -250,6 +275,10 @@
         "tool_first_intervention_strategy": {
           "type": "string",
           "enum": ["baseline", "tool_first_nudge", "tool_first_strict"]
+        },
+        "first_turn_protocol_gate_mode": {
+          "type": "string",
+          "enum": ["off", "retry_once_pz_cr"]
         }
       }
     }

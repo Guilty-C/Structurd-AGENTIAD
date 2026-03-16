@@ -25,6 +25,12 @@
     "raw_output_path",
     "raw_output_sha256",
     "trace_path",
+    "first_turn_protocol_gate_mode",
+    "first_turn_gate_triggered",
+    "first_turn_gate_retry_count",
+    "first_turn_gate_recovered",
+    "first_turn_gate_outcome",
+    "first_turn_gate_sidecar_path",
     "first_protocol_event_type",
     "first_assistant_output_terminal",
     "tool_call_count",
@@ -74,6 +80,25 @@
     "raw_output_path": { "type": "string", "minLength": 1 },
     "raw_output_sha256": { "type": "string", "minLength": 1 },
     "trace_path": { "type": "string", "minLength": 1 },
+    "first_turn_protocol_gate_mode": {
+      "type": "string",
+      "enum": ["off", "retry_once_pz_cr"]
+    },
+    "first_turn_gate_triggered": { "type": "boolean" },
+    "first_turn_gate_retry_count": { "type": "integer", "minimum": 0, "maximum": 1 },
+    "first_turn_gate_recovered": { "type": "boolean" },
+    "first_turn_gate_outcome": {
+      "type": "string",
+      "enum": [
+        "not_triggered",
+        "recovered_to_tool_call",
+        "still_terminal_after_retry",
+        "retry_parse_failure"
+      ]
+    },
+    "first_turn_gate_sidecar_path": {
+      "type": ["string", "null"]
+    },
     "first_protocol_event_type": {
       "type": "string",
       "enum": ["final_answer", "tool_call", "parse_failure", "runtime_fail_before_generation", "unknown"]

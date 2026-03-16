@@ -78,6 +78,12 @@ def build_prediction_record(
     raw_output_path: str,
     raw_output_sha256: str,
     trace_path: str,
+    first_turn_protocol_gate_mode: str,
+    first_turn_gate_triggered: bool,
+    first_turn_gate_retry_count: int,
+    first_turn_gate_recovered: bool,
+    first_turn_gate_outcome: str,
+    first_turn_gate_sidecar_path: str | None,
     first_protocol_event_type: str,
     first_assistant_output_terminal: bool,
     tool_call_count: int,
@@ -110,6 +116,12 @@ def build_prediction_record(
         "raw_output_path": raw_output_path,
         "raw_output_sha256": raw_output_sha256,
         "trace_path": trace_path,
+        "first_turn_protocol_gate_mode": first_turn_protocol_gate_mode,
+        "first_turn_gate_triggered": first_turn_gate_triggered,
+        "first_turn_gate_retry_count": first_turn_gate_retry_count,
+        "first_turn_gate_recovered": first_turn_gate_recovered,
+        "first_turn_gate_outcome": first_turn_gate_outcome,
+        "first_turn_gate_sidecar_path": first_turn_gate_sidecar_path,
         "first_protocol_event_type": first_protocol_event_type,
         "first_assistant_output_terminal": first_assistant_output_terminal,
         "tool_call_count": tool_call_count,
@@ -199,8 +211,10 @@ def build_metrics_report(
     seeds: list[int],
     runtime_provenance: dict[str, Any],
     tool_first_intervention_strategy: str | None = None,
+    first_turn_protocol_gate_mode: str | None = None,
     prompt_audit_summary: dict[str, int] | None = None,
     zero_tool_behavior_summary: dict[str, Any] | None = None,
+    first_turn_gate_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-seed, per-class, and mean/std inference metrics."""
 
@@ -270,10 +284,14 @@ def build_metrics_report(
     }
     if tool_first_intervention_strategy is not None:
         report["tool_first_intervention_strategy"] = tool_first_intervention_strategy
+    if first_turn_protocol_gate_mode is not None:
+        report["first_turn_protocol_gate_mode"] = first_turn_protocol_gate_mode
     if prompt_audit_summary is not None:
         report["prompt_audit_summary"] = prompt_audit_summary
     if zero_tool_behavior_summary is not None:
         report["zero_tool_behavior_summary"] = zero_tool_behavior_summary
+    if first_turn_gate_summary is not None:
+        report["first_turn_gate_summary"] = first_turn_gate_summary
     validate_payload(report, "baseline_metrics_report.schema.json")
     return report
 
@@ -307,9 +325,11 @@ def build_run_summary(
     artifact_paths: dict[str, str],
     notes: list[str] | None = None,
     tool_first_intervention_strategy: str | None = None,
+    first_turn_protocol_gate_mode: str | None = None,
     normalization_summary: dict[str, int] | None = None,
     prompt_audit_summary: dict[str, int] | None = None,
     zero_tool_behavior_summary: dict[str, Any] | None = None,
+    first_turn_gate_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one compact summary manifest for the evidence package."""
 
@@ -348,12 +368,16 @@ def build_run_summary(
     }
     if tool_first_intervention_strategy is not None:
         summary["tool_first_intervention_strategy"] = tool_first_intervention_strategy
+    if first_turn_protocol_gate_mode is not None:
+        summary["first_turn_protocol_gate_mode"] = first_turn_protocol_gate_mode
     if normalization_summary is not None:
         summary["normalization_summary"] = normalization_summary
     if prompt_audit_summary is not None:
         summary["prompt_audit_summary"] = prompt_audit_summary
     if zero_tool_behavior_summary is not None:
         summary["zero_tool_behavior_summary"] = zero_tool_behavior_summary
+    if first_turn_gate_summary is not None:
+        summary["first_turn_gate_summary"] = first_turn_gate_summary
     validate_payload(summary, "baseline_run_summary.schema.json")
     return summary
 

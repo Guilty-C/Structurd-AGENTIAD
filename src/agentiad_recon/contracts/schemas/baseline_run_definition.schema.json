@@ -166,6 +166,10 @@
           "type": "string",
           "enum": ["baseline", "tool_first_nudge", "tool_first_strict"]
         },
+        "first_turn_protocol_gate_mode": {
+          "type": "string",
+          "enum": ["off", "retry_once_pz_cr"]
+        },
         "generation": {
           "type": "object",
           "additionalProperties": false,

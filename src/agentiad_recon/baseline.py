@@ -65,6 +65,7 @@ from agentiad_recon.traces import TraceMessage, TraceRecord
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+FIRST_TURN_PROTOCOL_GATE_MODES = ("off", "retry_once_pz_cr")
 
 
 class InferenceRunError(RuntimeError):
@@ -131,6 +132,7 @@ def _runtime_defaults() -> dict[str, Any]:
             "top_p": 1.0,
         },
         "tool_first_intervention_strategy": "baseline",
+        "first_turn_protocol_gate_mode": "off",
     }
 
 
@@ -158,6 +160,7 @@ def _runtime_config(
         "dtype",
         "device",
         "tool_first_intervention_strategy",
+        "first_turn_protocol_gate_mode",
     ):
         if runtime_overrides and key in runtime_overrides and runtime_overrides[key] is not None:
             config[key] = runtime_overrides[key]
@@ -171,6 +174,11 @@ def _runtime_config(
         raise InferenceRunError(
             "Unsupported tool_first_intervention_strategy: "
             f"{config['tool_first_intervention_strategy']!r}"
+        )
+    if config["first_turn_protocol_gate_mode"] not in FIRST_TURN_PROTOCOL_GATE_MODES:
+        raise InferenceRunError(
+            "Unsupported first_turn_protocol_gate_mode: "
+            f"{config['first_turn_protocol_gate_mode']!r}"
         )
 
     resolved_dataset_root = _resolve_path(dataset_root or definition["sample_source"]["path"])
@@ -210,6 +218,7 @@ def _resolved_runtime_provenance(
         "dtype": runtime_config["dtype"],
         "device": runtime_config["device"],
         "tool_first_intervention_strategy": runtime_config["tool_first_intervention_strategy"],
+        "first_turn_protocol_gate_mode": runtime_config["first_turn_protocol_gate_mode"],
     }
 
 
@@ -366,6 +375,30 @@ def _append_final_answer_message(
     )
 
 
+def _append_runtime_gate_reminder(
+    history: list[dict[str, Any]],
+    reminder_text: str,
+    *,
+    gate_mode: str,
+) -> None:
+    """Append the auditable user-side runtime reminder used by the protocol gate."""
+
+    history.append(
+        {
+            "role": "user",
+            "message_type": "user_prompt",
+            "content": reminder_text,
+            "image_refs": [],
+            "metadata": {
+                "runtime_intervention": "first_turn_protocol_gate",
+                "first_turn_protocol_gate_mode": gate_mode,
+            },
+            "tool_name": None,
+            "call_id": None,
+        }
+    )
+
+
 def _history_to_trace_messages(history: list[dict[str, Any]]) -> tuple[TraceMessage, ...]:
     """Project the mutable history into the canonical trace dataclasses."""
 
@@ -407,6 +440,18 @@ def _normalization_sidecar_path(raw_output_path: Path) -> Path:
     """Build the sidecar path for one auditable normalization event."""
 
     return raw_output_path.with_suffix(".normalization.json")
+
+
+def _first_turn_gate_sidecar_path(raw_root: Path, *, seed: int, sample_slug: str) -> Path:
+    """Build the sidecar path for one first-turn protocol gate event."""
+
+    return raw_root / f"seed_{seed}" / sample_slug / "first_turn_gate.turn_0.json"
+
+
+def _retry_raw_output_path(raw_root: Path, *, seed: int, sample_slug: str, turn_index: int, retry_count: int) -> Path:
+    """Build the raw-output path for one auditable retry attempt."""
+
+    return raw_root / f"seed_{seed}" / sample_slug / f"turn_{turn_index}.retry_{retry_count}.txt"
 
 
 def _prompt_audit_sidecar_path(raw_root: Path, *, seed: int, sample_slug: str) -> Path:
@@ -575,6 +620,62 @@ def _prompt_audit_summary(prediction_records: list[dict[str, Any]]) -> dict[str,
         if failed and (record.get("failure_reason") is None or not str(record["failure_reason"]).strip()):
             summary["failed_count_with_missing_reason_count"] += 1
     return summary
+
+
+def _first_turn_protocol_gate_retry_instruction() -> str:
+    """Return the deterministic runtime reminder used by the first-turn gate."""
+
+    return (
+        "Runtime protocol reminder: this is a pz_cr run. On the first step, do not return a final answer yet. "
+        "First inspect with crop_image_normalized. If local evidence is still insufficient after crop, query_image "
+        "is allowed. Reply now with exactly one valid <tool_call> and no <answer>."
+    )
+
+
+def _should_trigger_first_turn_gate(
+    *,
+    gate_mode: str,
+    tool_mode: str,
+    prompt_audit: dict[str, Any],
+    turn_index: int,
+    event: str,
+    tool_traces: list[dict[str, Any]],
+) -> bool:
+    """Return whether the opt-in first-turn protocol gate should fire."""
+
+    return (
+        gate_mode == "retry_once_pz_cr"
+        and tool_mode == "pz_cr"
+        and not prompt_audit["mode_contract_mismatch"]
+        and prompt_audit["cr_available_in_prompt_surface"]
+        and not prompt_audit["prompt_contains_pz_only"]
+        and turn_index == 0
+        and event == "final_answer"
+        and not tool_traces
+    )
+
+
+def _first_turn_gate_summary(prediction_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate first-turn gate outcomes across prediction records."""
+
+    trigger_count = sum(1 for record in prediction_records if record["first_turn_gate_triggered"])
+    recovered_count = sum(
+        1 for record in prediction_records if record["first_turn_gate_outcome"] == "recovered_to_tool_call"
+    )
+    still_terminal_count = sum(
+        1 for record in prediction_records if record["first_turn_gate_outcome"] == "still_terminal_after_retry"
+    )
+    retry_parse_failure_count = sum(
+        1 for record in prediction_records if record["first_turn_gate_outcome"] == "retry_parse_failure"
+    )
+    return {
+        "first_turn_gate_trigger_count": trigger_count,
+        "samples_with_first_turn_gate_events": trigger_count,
+        "first_turn_gate_recovered_to_tool_call_count": recovered_count,
+        "first_turn_gate_still_terminal_count": still_terminal_count,
+        "first_turn_gate_retry_parse_failure_count": retry_parse_failure_count,
+        "first_turn_gate_recovery_rate": (recovered_count / trigger_count) if trigger_count else 0.0,
+    }
 
 
 def _artifact_dirs(definition: dict[str, Any], root: Path) -> dict[str, Path]:
@@ -794,6 +895,12 @@ def run_baseline(
                 raw_output_path=str(raw_output_path.resolve()),
                 raw_output_sha256=sha256_file(raw_output_path),
                 trace_path=str(trace_path.resolve()),
+                first_turn_protocol_gate_mode="off",
+                first_turn_gate_triggered=False,
+                first_turn_gate_retry_count=0,
+                first_turn_gate_recovered=False,
+                first_turn_gate_outcome="not_triggered",
+                first_turn_gate_sidecar_path=None,
                 metadata={
                     "backend_metadata": response.metadata,
                     "sample_source_kind": sample["metadata"].get("dataset_kind"),
@@ -958,6 +1065,13 @@ def _tool_loop_sample(
     first_protocol_event_type = "unknown"
     terminal_answer_present = False
     terminal_answer_turn_index: int | None = None
+    first_turn_protocol_gate_mode = runtime_config["first_turn_protocol_gate_mode"]
+    first_turn_gate_triggered = False
+    first_turn_gate_retry_count = 0
+    first_turn_gate_recovered = False
+    first_turn_gate_outcome = "not_triggered"
+    first_turn_gate_sidecar: dict[str, Any] | None = None
+    first_turn_gate_sidecar_path: Path | None = None
     prompt_audit_path = _prompt_audit_sidecar_path(directories["raw_outputs"], seed=seed, sample_slug=sample_slug)
     prompt_audit = _prompt_audit_payload(
         prompt_bundle,
@@ -994,36 +1108,22 @@ def _tool_loop_sample(
             error_message=error_message,
         )
 
-    for turn_index in range(definition["max_tool_turns"] + 1):
-        if prompt_audit["mode_contract_mismatch"]:
-            break
-        request = BackendRequest(
-            sample_id=sample["sample_id"],
-            seed=seed,
-            prompt_version=prompt_bundle.prompt_version,
-            messages=history,
-            stop_sequences=prompt_bundle.stop_sequences,
-            tool_mode=definition["mode"],
-            metadata={
-                "tool_mode": definition["mode"],
-                "turn_index": turn_index,
-                "sample_kind": sample["metadata"].get("dataset_kind", "unknown"),
-            },
-        )
-        response = backend.generate(request, sample=sample)
-        raw_output_path = _raw_output_path(
-            directories["raw_outputs"],
-            seed=seed,
-            sample_slug=sample_slug,
-            turn_index=turn_index,
-        )
+    def _record_response_and_normalize(
+        response: Any,
+        *,
+        turn_index: int,
+        raw_output_path: Path,
+    ) -> tuple[Any, str, dict[str, Any] | None]:
+        """Persist one raw output and return the normalized protocol decision."""
+
+        nonlocal last_raw_output_path
+        nonlocal first_protocol_event_type
         _write_text(raw_output_path, response.raw_output)
         last_raw_output_path = raw_output_path
-
         _append_reasoning(history, response.raw_output, backend_name=response.backend_name)
         decision = normalize_protocol_turn(response.raw_output, tool_path=definition["mode"])
         event = decision.event_type
-        if turn_index == 0:
+        if turn_index == 0 and first_protocol_event_type == "unknown":
             if event == "tool_call":
                 first_protocol_event_type = "tool_call"
             elif event == "final_answer":
@@ -1053,6 +1153,153 @@ def _tool_loop_sample(
                 ],
                 "normalization_sidecar_path": str(sidecar_path.resolve()),
             }
+        return decision, event, normalization_metadata
+
+    for turn_index in range(definition["max_tool_turns"] + 1):
+        if prompt_audit["mode_contract_mismatch"]:
+            break
+        request = BackendRequest(
+            sample_id=sample["sample_id"],
+            seed=seed,
+            prompt_version=prompt_bundle.prompt_version,
+            messages=history,
+            stop_sequences=prompt_bundle.stop_sequences,
+            tool_mode=definition["mode"],
+            metadata={
+                "tool_mode": definition["mode"],
+                "turn_index": turn_index,
+                "sample_kind": sample["metadata"].get("dataset_kind", "unknown"),
+            },
+        )
+        response = backend.generate(request, sample=sample)
+        raw_output_path = _raw_output_path(
+            directories["raw_outputs"],
+            seed=seed,
+            sample_slug=sample_slug,
+            turn_index=turn_index,
+        )
+        decision, event, normalization_metadata = _record_response_and_normalize(
+            response,
+            turn_index=turn_index,
+            raw_output_path=raw_output_path,
+        )
+        if _should_trigger_first_turn_gate(
+            gate_mode=first_turn_protocol_gate_mode,
+            tool_mode=definition["mode"],
+            prompt_audit=prompt_audit,
+            turn_index=turn_index,
+            event=event,
+            tool_traces=tool_traces,
+        ):
+            first_turn_gate_triggered = True
+            first_turn_gate_retry_count = 1
+            first_turn_gate_sidecar_path = _first_turn_gate_sidecar_path(
+                directories["raw_outputs"],
+                seed=seed,
+                sample_slug=sample_slug,
+            )
+            retry_instruction_text = _first_turn_protocol_gate_retry_instruction()
+            trigger_reason = "turn0_direct_final_answer_under_valid_pz_cr_contract"
+            _append_final_answer_message(
+                history,
+                response.raw_output,
+                backend_name=response.backend_name,
+                raw_output_path=str(raw_output_path.resolve()),
+            )
+            _append_runtime_gate_reminder(
+                history,
+                retry_instruction_text,
+                gate_mode=first_turn_protocol_gate_mode,
+            )
+            retry_request = BackendRequest(
+                sample_id=sample["sample_id"],
+                seed=seed,
+                prompt_version=prompt_bundle.prompt_version,
+                messages=history,
+                stop_sequences=prompt_bundle.stop_sequences,
+                tool_mode=definition["mode"],
+                metadata={
+                    "tool_mode": definition["mode"],
+                    "turn_index": turn_index,
+                    "retry_count": 1,
+                    "runtime_intervention": "first_turn_protocol_gate",
+                    "sample_kind": sample["metadata"].get("dataset_kind", "unknown"),
+                },
+            )
+            retry_response = backend.generate(retry_request, sample=sample)
+            retry_raw_output_path = _retry_raw_output_path(
+                directories["raw_outputs"],
+                seed=seed,
+                sample_slug=sample_slug,
+                turn_index=turn_index,
+                retry_count=1,
+            )
+            retry_decision, retry_event, retry_normalization_metadata = _record_response_and_normalize(
+                retry_response,
+                turn_index=turn_index,
+                raw_output_path=retry_raw_output_path,
+            )
+            first_turn_gate_sidecar = {
+                "sample_id": sample["sample_id"],
+                "tool_mode": definition["mode"],
+                "gate_mode": first_turn_protocol_gate_mode,
+                "turn_index": turn_index,
+                "prompt_audit_path": str(prompt_audit_path.resolve()),
+                "prompt_contract_valid": not prompt_audit["mode_contract_mismatch"],
+                "gate_triggered": True,
+                "trigger_reason": trigger_reason,
+                "first_attempt_raw_output_path": str(raw_output_path.resolve()),
+                "retry_instruction_text": retry_instruction_text,
+                "retry_count": 1,
+                "retry_raw_output_path": str(retry_raw_output_path.resolve()),
+                "final_gate_outcome": "retry_parse_failure",
+            }
+            if retry_event == "tool_call":
+                first_turn_gate_recovered = True
+                first_turn_gate_outcome = "recovered_to_tool_call"
+                first_turn_gate_sidecar["final_gate_outcome"] = first_turn_gate_outcome
+                write_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
+                response = retry_response
+                raw_output_path = retry_raw_output_path
+                decision = retry_decision
+                event = retry_event
+                normalization_metadata = retry_normalization_metadata
+            elif retry_event == "final_answer":
+                terminal_answer_present = True
+                terminal_answer_turn_index = turn_index
+                try:
+                    prediction = parse_final_answer(retry_response.raw_output)
+                    parser_valid = True
+                    schema_valid = True
+                    first_turn_gate_outcome = "still_terminal_after_retry"
+                except Exception as exc:  # noqa: BLE001 - explicit gate failure path.
+                    error_message = str(exc)
+                    failure_reason = _failure_reason("parser_invalid", str(exc))
+                    first_turn_gate_outcome = "retry_parse_failure"
+                first_turn_gate_sidecar["final_gate_outcome"] = first_turn_gate_outcome
+                write_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
+                _append_final_answer_message(
+                    history,
+                    retry_response.raw_output,
+                    backend_name=retry_response.backend_name,
+                    raw_output_path=str(retry_raw_output_path.resolve()),
+                    error_message=error_message,
+                )
+                break
+            else:
+                error_message = "First-turn gate retry did not contain a valid tool call or final answer block"
+                failure_reason = "runtime_exception:first_turn_gate_retry_missing_contract_block"
+                first_turn_gate_outcome = "retry_parse_failure"
+                first_turn_gate_sidecar["final_gate_outcome"] = first_turn_gate_outcome
+                write_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
+                _append_final_answer_message(
+                    history,
+                    retry_response.raw_output,
+                    backend_name=retry_response.backend_name,
+                    raw_output_path=str(retry_raw_output_path.resolve()),
+                    error_message=error_message,
+                )
+                break
         if event == "tool_call":
             if len(tool_traces) >= definition["max_tool_turns"]:
                 error_message = f"Exceeded max_tool_turns={definition['max_tool_turns']} before final answer"
@@ -1172,6 +1419,15 @@ def _tool_loop_sample(
                 event["reason"] for event in normalization_events if event.get("reason") is not None
             ],
             "normalization_events": normalization_events,
+            "first_turn_protocol_gate_mode": first_turn_protocol_gate_mode,
+            "first_turn_gate_triggered": first_turn_gate_triggered,
+            "first_turn_gate_retry_count": first_turn_gate_retry_count,
+            "first_turn_gate_recovered": first_turn_gate_recovered,
+            "first_turn_gate_outcome": first_turn_gate_outcome,
+            "first_turn_gate_sidecar_path": (
+                str(first_turn_gate_sidecar_path.resolve()) if first_turn_gate_sidecar_path is not None else None
+            ),
+            "first_turn_gate": first_turn_gate_sidecar,
         },
     )
     trace_payload = trace.to_audit_payload()
@@ -1196,6 +1452,14 @@ def _tool_loop_sample(
         raw_output_path=str(last_raw_output_path.resolve()),
         raw_output_sha256=sha256_file(last_raw_output_path),
         trace_path=str(trace_path.resolve()),
+        first_turn_protocol_gate_mode=first_turn_protocol_gate_mode,
+        first_turn_gate_triggered=first_turn_gate_triggered,
+        first_turn_gate_retry_count=first_turn_gate_retry_count,
+        first_turn_gate_recovered=first_turn_gate_recovered,
+        first_turn_gate_outcome=first_turn_gate_outcome,
+        first_turn_gate_sidecar_path=(
+            str(first_turn_gate_sidecar_path.resolve()) if first_turn_gate_sidecar_path is not None else None
+        ),
         metadata={
             "sample_source_kind": sample["metadata"].get("dataset_kind"),
             "tool_trace_count": len(tool_traces),
@@ -1210,6 +1474,15 @@ def _tool_loop_sample(
                 event["reason"] for event in normalization_events if event.get("reason") is not None
             ],
             "normalization_events": normalization_events,
+            "first_turn_protocol_gate_mode": first_turn_protocol_gate_mode,
+            "first_turn_gate_triggered": first_turn_gate_triggered,
+            "first_turn_gate_retry_count": first_turn_gate_retry_count,
+            "first_turn_gate_recovered": first_turn_gate_recovered,
+            "first_turn_gate_outcome": first_turn_gate_outcome,
+            "first_turn_gate_sidecar_path": (
+                str(first_turn_gate_sidecar_path.resolve()) if first_turn_gate_sidecar_path is not None else None
+            ),
+            "first_turn_gate": first_turn_gate_sidecar,
             "runtime_provenance": _resolved_runtime_provenance(
                 definition,
                 runtime_config,
@@ -1274,6 +1547,7 @@ def run_tool_augmented(
     normalization_summary = _normalization_summary(prediction_records)
     prompt_audit_summary = _prompt_audit_summary(prediction_records)
     zero_tool_behavior_summary = summarize_zero_tool_behavior(prediction_records)
+    first_turn_gate_summary = _first_turn_gate_summary(prediction_records)
     zero_tool_sidecars = write_zero_tool_behavior_sidecars(
         prediction_records=prediction_records,
         metrics_dir=directories["metrics"],
@@ -1288,8 +1562,10 @@ def run_tool_augmented(
         seeds=definition["seeds"],
         runtime_provenance=runtime_provenance,
         tool_first_intervention_strategy=runtime_provenance["tool_first_intervention_strategy"],
+        first_turn_protocol_gate_mode=runtime_provenance["first_turn_protocol_gate_mode"],
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
+        first_turn_gate_summary=first_turn_gate_summary,
     )
     metrics_report_path = directories["metrics"] / "metrics_report.json"
     per_seed_metrics_path = directories["metrics"] / "per_seed_metrics.json"
@@ -1373,9 +1649,11 @@ def run_tool_augmented(
         },
         notes=definition.get("notes", []),
         tool_first_intervention_strategy=runtime_provenance["tool_first_intervention_strategy"],
+        first_turn_protocol_gate_mode=runtime_provenance["first_turn_protocol_gate_mode"],
         normalization_summary=normalization_summary,
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
+        first_turn_gate_summary=first_turn_gate_summary,
     )
     summary_path = directories["root"] / "run_summary.json"
     write_json(summary_path, summary)
@@ -1394,10 +1672,12 @@ def run_tool_augmented(
         },
         "execution_boundary": definition["execution_boundary"],
         "tool_first_intervention_strategy": runtime_provenance["tool_first_intervention_strategy"],
+        "first_turn_protocol_gate_mode": runtime_provenance["first_turn_protocol_gate_mode"],
         "run_provenance": runtime_provenance,
         "normalization_summary": normalization_summary,
         "prompt_audit_summary": prompt_audit_summary,
         "zero_tool_behavior_summary": zero_tool_behavior_summary,
+        "first_turn_gate_summary": first_turn_gate_summary,
         "notes": [
             "Tool-augmented inference summary manifest.",
             (
@@ -1518,6 +1798,11 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=TOOL_FIRST_INTERVENTION_STRATEGIES,
         help="Optional first-turn prompt intervention strategy override for tool-enabled pz_cr eval.",
     )
+    parser.add_argument(
+        "--first-turn-protocol-gate-mode",
+        choices=FIRST_TURN_PROTOCOL_GATE_MODES,
+        help="Optional first-turn protocol gate override. Defaults to off.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate config/runtime surfaces without inference.")
     return parser
 
@@ -1536,6 +1821,7 @@ def main() -> int:
         "local_files_only": args.local_files_only,
         "trust_remote_code": args.trust_remote_code,
         "tool_first_intervention_strategy": args.tool_first_intervention_strategy,
+        "first_turn_protocol_gate_mode": args.first_turn_protocol_gate_mode,
         "generation": {
             key: value
             for key, value in {
