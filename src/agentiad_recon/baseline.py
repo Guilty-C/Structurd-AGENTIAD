@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -391,6 +392,109 @@ def _normalization_sidecar_path(raw_output_path: Path) -> Path:
     return raw_output_path.with_suffix(".normalization.json")
 
 
+def _prompt_audit_sidecar_path(raw_root: Path, *, seed: int, sample_slug: str) -> Path:
+    """Build the prompt-audit sidecar path for one sample's first turn."""
+
+    return raw_root / f"seed_{seed}" / sample_slug / "prompt_audit.turn_0.json"
+
+
+def _sanitize_failure_detail(text: str) -> str:
+    """Convert a free-form error detail into a stable machine-readable token."""
+
+    token = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
+    return token[:96] or "unspecified"
+
+
+def _failure_reason(prefix: str, detail: str | None = None) -> str:
+    """Render one structured failure reason with an optional normalized detail."""
+
+    if detail is None or not detail.strip():
+        return prefix
+    return f"{prefix}:{_sanitize_failure_detail(detail)}"
+
+
+def _resolve_failure_reason(
+    *,
+    prediction: dict[str, Any] | None,
+    parser_valid: bool,
+    schema_valid: bool,
+    failure_reason: str | None,
+    error_message: str | None,
+) -> str | None:
+    """Guarantee that every failed sample carries a concrete machine-readable reason."""
+
+    failed = prediction is None or not parser_valid or not schema_valid
+    if not failed:
+        return None
+    if failure_reason is not None and failure_reason.strip():
+        return failure_reason
+    if error_message is not None and error_message.strip():
+        return _failure_reason("runtime_exception", error_message)
+    return "runtime_exception:missing_failure_reason_context"
+
+
+def _prompt_audit_payload(
+    prompt_bundle: Any,
+    *,
+    sample_id: str,
+    seed: int,
+    turn_index: int,
+    runtime_tool_mode: str,
+) -> dict[str, Any]:
+    """Build an auditable snapshot of the rendered prompt/tool surface."""
+
+    system_text = "\n\n".join(
+        message["content"] for message in prompt_bundle.messages if message["role"] == "system"
+    )
+    user_text = "\n\n".join(
+        message["content"] for message in prompt_bundle.messages if message["role"] == "user"
+    )
+    rendered_text = "\n\n".join(
+        message["content"] for message in prompt_bundle.messages if isinstance(message.get("content"), str)
+    )
+    rendered_text_lower = rendered_text.lower()
+    if "available tools: pz and cr" in rendered_text_lower:
+        declared_available_tools = ["PZ", "CR"]
+    elif "available tools: pz only" in rendered_text_lower:
+        declared_available_tools = ["PZ"]
+    else:
+        declared_available_tools = []
+        if re.search(r"\bPZ\b", rendered_text) is not None:
+            declared_available_tools.append("PZ")
+        if re.search(r"\bCR\b", rendered_text) is not None and "do not request cr in this mode" not in rendered_text_lower:
+            declared_available_tools.append("CR")
+
+    prompt_contains_pz_only = (
+        "pz_only" in rendered_text_lower or "available tools: pz only" in rendered_text_lower
+    )
+    prompt_contains_pz_cr = "pz_cr" in rendered_text_lower
+    cr_available_in_prompt_surface = "available tools: pz and cr" in rendered_text_lower
+    mismatch_reasons: list[str] = []
+    if runtime_tool_mode == "pz_cr":
+        if prompt_contains_pz_only:
+            mismatch_reasons.append("mode_contract_pz_only_leakage")
+        if not cr_available_in_prompt_surface or "CR" not in declared_available_tools:
+            mismatch_reasons.append("mode_contract_missing_cr_tool")
+
+    return {
+        "sample_id": sample_id,
+        "seed": seed,
+        "turn_index": turn_index,
+        "runtime_tool_mode": runtime_tool_mode,
+        "system_text": system_text,
+        "user_text": user_text,
+        "rendered_text": rendered_text,
+        "declared_available_tools": declared_available_tools,
+        "prompt_contains_pz_only": prompt_contains_pz_only,
+        "prompt_contains_pz_cr": prompt_contains_pz_cr,
+        "tool_surface_contains_pz": re.search(r"\bPZ\b", rendered_text) is not None,
+        "tool_surface_contains_cr": re.search(r"\bCR\b", rendered_text) is not None,
+        "cr_available_in_prompt_surface": cr_available_in_prompt_surface,
+        "mode_contract_mismatch": bool(mismatch_reasons),
+        "mismatch_reasons": mismatch_reasons,
+    }
+
+
 def _normalization_summary(prediction_records: list[dict[str, Any]]) -> dict[str, int]:
     """Aggregate mixed-output normalization counts across prediction records."""
 
@@ -417,6 +521,33 @@ def _normalization_summary(prediction_records: list[dict[str, Any]]) -> dict[str
             summary["additional_valid_tool_calls_discarded_count"] += int(
                 event.get("additional_valid_tool_calls_discarded", 0)
             )
+    return summary
+
+
+def _prompt_audit_summary(prediction_records: list[dict[str, Any]]) -> dict[str, int]:
+    """Aggregate prompt-audit coverage and mismatch counts across prediction records."""
+
+    summary = {
+        "prompt_audit_event_count": 0,
+        "samples_with_prompt_audit_mismatch": 0,
+        "mode_contract_missing_cr_tool_count": 0,
+        "mode_contract_pz_only_leakage_count": 0,
+        "failed_count_with_missing_reason_count": 0,
+    }
+    for record in prediction_records:
+        prompt_audit = record.get("metadata", {}).get("prompt_audit")
+        if prompt_audit is not None:
+            summary["prompt_audit_event_count"] += 1
+            mismatch_reasons = set(prompt_audit.get("mismatch_reasons", []))
+            if prompt_audit.get("mode_contract_mismatch"):
+                summary["samples_with_prompt_audit_mismatch"] += 1
+            if "mode_contract_missing_cr_tool" in mismatch_reasons:
+                summary["mode_contract_missing_cr_tool_count"] += 1
+            if "mode_contract_pz_only_leakage" in mismatch_reasons:
+                summary["mode_contract_pz_only_leakage_count"] += 1
+        failed = (record["prediction"] is None) or (not record["parser_valid"]) or (not record["schema_valid"])
+        if failed and (record.get("failure_reason") is None or not str(record["failure_reason"]).strip()):
+            summary["failed_count_with_missing_reason_count"] += 1
     return summary
 
 
@@ -565,6 +696,7 @@ def run_baseline(
             parser_valid = False
             schema_valid = False
             error_message: str | None = None
+            failure_reason: str | None = None
             _append_reasoning(history, response.raw_output, backend_name=response.backend_name)
             try:
                 prediction = parse_final_answer(response.raw_output)
@@ -572,6 +704,14 @@ def run_baseline(
                 schema_valid = True
             except Exception as exc:  # noqa: BLE001 - gate needs explicit failures.
                 error_message = str(exc)
+                failure_reason = _failure_reason("parser_invalid", str(exc))
+            failure_reason = _resolve_failure_reason(
+                prediction=prediction,
+                parser_valid=parser_valid,
+                schema_valid=schema_valid,
+                failure_reason=failure_reason,
+                error_message=error_message,
+            )
             _append_final_answer_message(
                 history,
                 response.raw_output,
@@ -612,6 +752,7 @@ def run_baseline(
                 parser_valid=parser_valid,
                 schema_valid=schema_valid,
                 error_message=error_message,
+                failure_reason=failure_reason,
                 raw_output_path=str(raw_output_path.resolve()),
                 raw_output_sha256=sha256_file(raw_output_path),
                 trace_path=str(trace_path.resolve()),
@@ -761,11 +902,47 @@ def _tool_loop_sample(
     parser_valid = False
     schema_valid = False
     error_message: str | None = None
+    failure_reason: str | None = None
     last_raw_output_path: Path | None = None
     normalization_events: list[dict[str, Any]] = []
     normalization_event_paths: list[str] = []
+    prompt_audit_path = _prompt_audit_sidecar_path(directories["raw_outputs"], seed=seed, sample_slug=sample_slug)
+    prompt_audit = _prompt_audit_payload(
+        prompt_bundle,
+        sample_id=sample["sample_id"],
+        seed=seed,
+        turn_index=0,
+        runtime_tool_mode=definition["mode"],
+    )
+    write_json(prompt_audit_path, prompt_audit)
+
+    if prompt_audit["mode_contract_mismatch"]:
+        failure_reason = prompt_audit["mismatch_reasons"][0]
+        error_message = (
+            "Prompt audit mismatch before backend.generate(): "
+            + ", ".join(prompt_audit["mismatch_reasons"])
+        )
+        last_raw_output_path = _raw_output_path(
+            directories["raw_outputs"],
+            seed=seed,
+            sample_slug=sample_slug,
+            turn_index=0,
+        )
+        _write_text(
+            last_raw_output_path,
+            f"NO_GENERATION: {error_message}",
+        )
+        _append_final_answer_message(
+            history,
+            f"NO_GENERATION: {error_message}",
+            backend_name=definition["backend"]["name"],
+            raw_output_path=str(last_raw_output_path.resolve()),
+            error_message=error_message,
+        )
 
     for turn_index in range(definition["max_tool_turns"] + 1):
+        if prompt_audit["mode_contract_mismatch"]:
+            break
         request = BackendRequest(
             sample_id=sample["sample_id"],
             seed=seed,
@@ -818,6 +995,7 @@ def _tool_loop_sample(
         if event == "tool_call":
             if len(tool_traces) >= definition["max_tool_turns"]:
                 error_message = f"Exceeded max_tool_turns={definition['max_tool_turns']} before final answer"
+                failure_reason = "runtime_exception:exceeded_max_tool_turns"
                 _append_tool_request(
                     history,
                     response.raw_output,
@@ -836,6 +1014,7 @@ def _tool_loop_sample(
                 )
             except Exception as exc:  # noqa: BLE001 - explicit gate failure path.
                 error_message = str(exc)
+                failure_reason = _failure_reason("runtime_exception", str(exc))
                 _append_tool_request(
                     history,
                     response.raw_output,
@@ -875,6 +1054,7 @@ def _tool_loop_sample(
                 schema_valid = True
             except Exception as exc:  # noqa: BLE001 - explicit gate failure path.
                 error_message = str(exc)
+                failure_reason = _failure_reason("parser_invalid", str(exc))
             _append_final_answer_message(
                 history,
                 response.raw_output,
@@ -885,6 +1065,7 @@ def _tool_loop_sample(
             break
 
         error_message = "Assistant output did not contain a valid tool call or final answer block"
+        failure_reason = "runtime_exception:assistant_output_missing_contract_block"
         _append_final_answer_message(
             history,
             response.raw_output,
@@ -896,6 +1077,14 @@ def _tool_loop_sample(
 
     if last_raw_output_path is None:
         raise InferenceRunError("Tool loop exited without producing any raw output")
+
+    failure_reason = _resolve_failure_reason(
+        prediction=prediction,
+        parser_valid=parser_valid,
+        schema_valid=schema_valid,
+        failure_reason=failure_reason,
+        error_message=error_message,
+    )
 
     trace = TraceRecord(
         trace_id=f"{definition['run_id']}:{seed}:{sample['sample_id']}",
@@ -910,6 +1099,10 @@ def _tool_loop_sample(
             "seed": seed,
             "sample_category": sample["category"],
             "tool_mode": definition["mode"],
+            "prompt_audit_path": str(prompt_audit_path.resolve()),
+            "prompt_audit_mismatch": prompt_audit["mode_contract_mismatch"],
+            "prompt_audit_mismatch_reasons": prompt_audit["mismatch_reasons"],
+            "prompt_audit": prompt_audit,
             "normalization_event_count": len(normalization_events),
             "normalization_event_paths": normalization_event_paths,
             "normalization_event_reasons": [
@@ -936,6 +1129,7 @@ def _tool_loop_sample(
         parser_valid=parser_valid,
         schema_valid=schema_valid,
         error_message=error_message,
+        failure_reason=failure_reason,
         raw_output_path=str(last_raw_output_path.resolve()),
         raw_output_sha256=sha256_file(last_raw_output_path),
         trace_path=str(trace_path.resolve()),
@@ -943,6 +1137,10 @@ def _tool_loop_sample(
             "sample_source_kind": sample["metadata"].get("dataset_kind"),
             "tool_trace_count": len(tool_traces),
             "tool_names": [trace["tool_name"] for trace in tool_traces],
+            "prompt_audit_path": str(prompt_audit_path.resolve()),
+            "prompt_audit_mismatch": prompt_audit["mode_contract_mismatch"],
+            "prompt_audit_mismatch_reasons": prompt_audit["mismatch_reasons"],
+            "prompt_audit": prompt_audit,
             "normalization_event_count": len(normalization_events),
             "normalization_event_paths": normalization_event_paths,
             "normalization_event_reasons": [
@@ -1004,6 +1202,7 @@ def run_tool_augmented(
 
     runtime_provenance = _resolved_runtime_provenance(definition, runtime_config, backend)
     normalization_summary = _normalization_summary(prediction_records)
+    prompt_audit_summary = _prompt_audit_summary(prediction_records)
     metrics_report = build_metrics_report(
         run_id=definition["run_id"],
         tool_mode=definition["mode"],
@@ -1013,6 +1212,7 @@ def run_tool_augmented(
         prediction_records=prediction_records,
         seeds=definition["seeds"],
         runtime_provenance=runtime_provenance,
+        prompt_audit_summary=prompt_audit_summary,
     )
     metrics_report_path = directories["metrics"] / "metrics_report.json"
     per_seed_metrics_path = directories["metrics"] / "per_seed_metrics.json"
@@ -1085,6 +1285,7 @@ def run_tool_augmented(
         },
         notes=definition.get("notes", []),
         normalization_summary=normalization_summary,
+        prompt_audit_summary=prompt_audit_summary,
     )
     summary_path = directories["root"] / "run_summary.json"
     write_json(summary_path, summary)
@@ -1104,6 +1305,7 @@ def run_tool_augmented(
         "execution_boundary": definition["execution_boundary"],
         "run_provenance": runtime_provenance,
         "normalization_summary": normalization_summary,
+        "prompt_audit_summary": prompt_audit_summary,
         "notes": [
             "Tool-augmented inference summary manifest.",
             (

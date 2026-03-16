@@ -21,6 +21,7 @@
     "prediction",
     "ground_truth",
     "error_message",
+    "failure_reason",
     "raw_output_path",
     "raw_output_sha256",
     "trace_path",
@@ -58,6 +59,9 @@
       "$ref": "final_answer.schema.json"
     },
     "error_message": {
+      "type": ["string", "null"]
+    },
+    "failure_reason": {
       "type": ["string", "null"]
     },
     "raw_output_path": { "type": "string", "minLength": 1 },

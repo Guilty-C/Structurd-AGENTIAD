@@ -111,6 +111,7 @@ Prompt 2.0 keeps [src/agentiad_recon/baseline.py](/home/zbr/project/lrrelevant/S
 - deterministic generation config is sanitized for clean transformer execution, so ignored sampling-only kwargs are not passed when `do_sample=false`
 - Prompt 2.1 cleaned deterministic generation hygiene first, and Prompt 2.2 further tightens real generate-input device placement by resolving the language-input device through the backend runtime path instead of suppressing warnings
 - Prompt 2.3 keeps the same unified tool evaluator but makes mixed tool-call/final-answer outputs auditable: mixed tool-call/final-answer outputs are normalized to the first legal tool call, the same-turn final answer is recorded as a premature final answer, and the raw output plus normalization evidence are written into trace-linked artifacts
+- Prompt 2.4 adds first-turn prompt audit sidecars plus fail-fast `pz_cr` mode-contract validation, so a leaked `pz_only` surface or missing CR availability becomes an auditable sample failure with a concrete `failure_reason` instead of a silent zero-tool run
 
 ## Trajectory Reconstruction For SFT
 

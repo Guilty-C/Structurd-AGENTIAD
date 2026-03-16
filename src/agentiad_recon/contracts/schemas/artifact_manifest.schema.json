@@ -129,6 +129,24 @@
         "additional_valid_tool_calls_discarded_count": { "type": "integer", "minimum": 0 }
       }
     },
+    "prompt_audit_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prompt_audit_event_count",
+        "samples_with_prompt_audit_mismatch",
+        "mode_contract_missing_cr_tool_count",
+        "mode_contract_pz_only_leakage_count",
+        "failed_count_with_missing_reason_count"
+      ],
+      "properties": {
+        "prompt_audit_event_count": { "type": "integer", "minimum": 0 },
+        "samples_with_prompt_audit_mismatch": { "type": "integer", "minimum": 0 },
+        "mode_contract_missing_cr_tool_count": { "type": "integer", "minimum": 0 },
+        "mode_contract_pz_only_leakage_count": { "type": "integer", "minimum": 0 },
+        "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "notes": {
       "type": "array",
       "items": {

@@ -74,6 +74,7 @@ def build_prediction_record(
     parser_valid: bool,
     schema_valid: bool,
     error_message: str | None,
+    failure_reason: str | None,
     raw_output_path: str,
     raw_output_sha256: str,
     trace_path: str,
@@ -98,6 +99,7 @@ def build_prediction_record(
         "prediction": prediction,
         "ground_truth": sample["ground_truth"],
         "error_message": error_message,
+        "failure_reason": failure_reason,
         "raw_output_path": raw_output_path,
         "raw_output_sha256": raw_output_sha256,
         "trace_path": trace_path,
@@ -182,6 +184,7 @@ def build_metrics_report(
     prediction_records: list[dict[str, Any]],
     seeds: list[int],
     runtime_provenance: dict[str, Any],
+    prompt_audit_summary: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-seed, per-class, and mean/std inference metrics."""
 
@@ -249,6 +252,8 @@ def build_metrics_report(
         "per_class_metrics": per_class_metrics,
         "aggregate_metrics": aggregate_metrics,
     }
+    if prompt_audit_summary is not None:
+        report["prompt_audit_summary"] = prompt_audit_summary
     validate_payload(report, "baseline_metrics_report.schema.json")
     return report
 
@@ -282,6 +287,7 @@ def build_run_summary(
     artifact_paths: dict[str, str],
     notes: list[str] | None = None,
     normalization_summary: dict[str, int] | None = None,
+    prompt_audit_summary: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Create one compact summary manifest for the evidence package."""
 
@@ -320,6 +326,8 @@ def build_run_summary(
     }
     if normalization_summary is not None:
         summary["normalization_summary"] = normalization_summary
+    if prompt_audit_summary is not None:
+        summary["prompt_audit_summary"] = prompt_audit_summary
     validate_payload(summary, "baseline_run_summary.schema.json")
     return summary
 
