@@ -90,6 +90,19 @@ def build_prediction_record(
     first_turn_gate_repair_original_failure_family: str | None,
     first_turn_gate_repair_failure_family: str | None,
     first_turn_gate_sidecar_path: str | None,
+    first_successful_tool_name: str | None,
+    first_successful_tool_turn_index: int | None,
+    post_pz_transition_audited: bool,
+    post_pz_transition_sidecar_path: str | None,
+    post_pz_transition_contract_valid_for_cr: bool | None,
+    post_pz_transition_mismatch_reasons: list[str],
+    post_pz_second_turn_protocol_event_type: str | None,
+    post_pz_second_turn_direct_final_without_cr: bool,
+    post_pz_second_turn_called_cr: bool,
+    post_pz_second_turn_called_non_cr_tool: bool,
+    post_pz_second_turn_parser_valid: bool | None,
+    post_pz_second_turn_schema_valid: bool | None,
+    post_pz_second_turn_failure_reason: str | None,
     first_protocol_event_type: str,
     first_assistant_output_terminal: bool,
     tool_call_count: int,
@@ -134,6 +147,19 @@ def build_prediction_record(
         "first_turn_gate_repair_original_failure_family": first_turn_gate_repair_original_failure_family,
         "first_turn_gate_repair_failure_family": first_turn_gate_repair_failure_family,
         "first_turn_gate_sidecar_path": first_turn_gate_sidecar_path,
+        "first_successful_tool_name": first_successful_tool_name,
+        "first_successful_tool_turn_index": first_successful_tool_turn_index,
+        "post_pz_transition_audited": post_pz_transition_audited,
+        "post_pz_transition_sidecar_path": post_pz_transition_sidecar_path,
+        "post_pz_transition_contract_valid_for_cr": post_pz_transition_contract_valid_for_cr,
+        "post_pz_transition_mismatch_reasons": post_pz_transition_mismatch_reasons,
+        "post_pz_second_turn_protocol_event_type": post_pz_second_turn_protocol_event_type,
+        "post_pz_second_turn_direct_final_without_cr": post_pz_second_turn_direct_final_without_cr,
+        "post_pz_second_turn_called_cr": post_pz_second_turn_called_cr,
+        "post_pz_second_turn_called_non_cr_tool": post_pz_second_turn_called_non_cr_tool,
+        "post_pz_second_turn_parser_valid": post_pz_second_turn_parser_valid,
+        "post_pz_second_turn_schema_valid": post_pz_second_turn_schema_valid,
+        "post_pz_second_turn_failure_reason": post_pz_second_turn_failure_reason,
         "first_protocol_event_type": first_protocol_event_type,
         "first_assistant_output_terminal": first_assistant_output_terminal,
         "tool_call_count": tool_call_count,
@@ -228,6 +254,7 @@ def build_metrics_report(
     zero_tool_behavior_summary: dict[str, Any] | None = None,
     first_turn_gate_summary: dict[str, Any] | None = None,
     first_turn_gate_repair_summary: dict[str, Any] | None = None,
+    post_pz_transition_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-seed, per-class, and mean/std inference metrics."""
 
@@ -307,6 +334,8 @@ def build_metrics_report(
         report["first_turn_gate_summary"] = first_turn_gate_summary
     if first_turn_gate_repair_summary is not None:
         report["first_turn_gate_repair_summary"] = first_turn_gate_repair_summary
+    if post_pz_transition_summary is not None:
+        report["post_pz_transition_summary"] = post_pz_transition_summary
     validate_payload(report, "baseline_metrics_report.schema.json")
     return report
 
@@ -346,6 +375,7 @@ def build_run_summary(
     zero_tool_behavior_summary: dict[str, Any] | None = None,
     first_turn_gate_summary: dict[str, Any] | None = None,
     first_turn_gate_repair_summary: dict[str, Any] | None = None,
+    post_pz_transition_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one compact summary manifest for the evidence package."""
 
@@ -396,6 +426,8 @@ def build_run_summary(
         summary["first_turn_gate_summary"] = first_turn_gate_summary
     if first_turn_gate_repair_summary is not None:
         summary["first_turn_gate_repair_summary"] = first_turn_gate_repair_summary
+    if post_pz_transition_summary is not None:
+        summary["post_pz_transition_summary"] = post_pz_transition_summary
     validate_payload(summary, "baseline_run_summary.schema.json")
     return summary
 

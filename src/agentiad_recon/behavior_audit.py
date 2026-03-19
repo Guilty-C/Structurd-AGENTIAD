@@ -19,6 +19,13 @@ ZERO_TOOL_SUMMARY_KEYS = (
     "zero_tool_terminal_count",
     "zero_tool_terminal_false_null_count",
 )
+POST_PZ_TRANSITION_MISMATCH_REASONS = (
+    "post_pz_transition_missing_reinserted_pz_result",
+    "post_pz_transition_missing_cr_tool",
+    "post_pz_transition_missing_query_image_instruction",
+    "post_pz_transition_pz_only_leakage",
+    "post_pz_transition_missing_tool_context",
+)
 
 
 def build_zero_tool_behavior_fields(
@@ -184,6 +191,149 @@ def build_tool_first_strategy_summary(
         "zero_tool_behavior_summary": zero_tool_behavior_summary,
         "prompt_audit_summary": prompt_audit_summary,
         "runtime_provenance": runtime_provenance,
+    }
+
+
+def summarize_post_pz_transition(prediction_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate post-PZ second-turn transition audit statistics across prediction records."""
+
+    event_records = [record for record in prediction_records if record.get("post_pz_transition_audited")]
+    failed_count_with_missing_reason_count = sum(
+        1
+        for record in event_records
+        if record.get("post_pz_second_turn_failure_reason")
+        and (record.get("failure_reason") is None or not str(record["failure_reason"]).strip())
+    )
+    return {
+        "post_pz_transition_event_count": len(event_records),
+        "samples_with_post_pz_transition_events": len(event_records),
+        "post_pz_transition_contract_valid_count": sum(
+            1 for record in event_records if record.get("post_pz_transition_contract_valid_for_cr") is True
+        ),
+        "post_pz_transition_contract_mismatch_count": sum(
+            1 for record in event_records if record.get("post_pz_transition_contract_valid_for_cr") is False
+        ),
+        "post_pz_transition_missing_reinserted_pz_result_count": sum(
+            1
+            for record in event_records
+            if "post_pz_transition_missing_reinserted_pz_result"
+            in record.get("post_pz_transition_mismatch_reasons", [])
+        ),
+        "post_pz_transition_missing_cr_tool_count": sum(
+            1
+            for record in event_records
+            if "post_pz_transition_missing_cr_tool" in record.get("post_pz_transition_mismatch_reasons", [])
+        ),
+        "post_pz_transition_missing_query_image_instruction_count": sum(
+            1
+            for record in event_records
+            if "post_pz_transition_missing_query_image_instruction"
+            in record.get("post_pz_transition_mismatch_reasons", [])
+        ),
+        "post_pz_transition_pz_only_leakage_count": sum(
+            1
+            for record in event_records
+            if "post_pz_transition_pz_only_leakage"
+            in record.get("post_pz_transition_mismatch_reasons", [])
+        ),
+        "post_pz_transition_missing_tool_context_count": sum(
+            1
+            for record in event_records
+            if "post_pz_transition_missing_tool_context"
+            in record.get("post_pz_transition_mismatch_reasons", [])
+        ),
+        "post_pz_second_turn_direct_final_without_cr_count": sum(
+            1 for record in event_records if record.get("post_pz_second_turn_direct_final_without_cr")
+        ),
+        "post_pz_second_turn_called_cr_count": sum(
+            1 for record in event_records if record.get("post_pz_second_turn_called_cr")
+        ),
+        "post_pz_second_turn_called_non_cr_tool_count": sum(
+            1 for record in event_records if record.get("post_pz_second_turn_called_non_cr_tool")
+        ),
+        "post_pz_second_turn_parser_failure_count": sum(
+            1
+            for record in event_records
+            if record.get("post_pz_second_turn_parser_valid") is False
+            or record.get("post_pz_second_turn_protocol_event_type") == "parse_failure"
+        ),
+        "failed_count_with_missing_reason_count": failed_count_with_missing_reason_count,
+    }
+
+
+def grouped_post_pz_transition(
+    prediction_records: list[dict[str, Any]],
+    *,
+    key_name: str,
+    key_fn: Any,
+) -> dict[str, dict[str, Any]]:
+    """Group prediction records and summarize post-PZ transition behavior for each key."""
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in prediction_records:
+        key = str(key_fn(record))
+        grouped.setdefault(key, []).append(record)
+
+    payload: dict[str, dict[str, Any]] = {}
+    for key in sorted(grouped):
+        records = grouped[key]
+        summary = summarize_post_pz_transition(records)
+        payload[key] = {
+            "sample_count": len(records),
+            "post_pz_transition_event_count": summary["post_pz_transition_event_count"],
+            "post_pz_transition_contract_valid_count": summary["post_pz_transition_contract_valid_count"],
+            "post_pz_transition_contract_mismatch_count": summary["post_pz_transition_contract_mismatch_count"],
+            "post_pz_second_turn_direct_final_without_cr_count": summary[
+                "post_pz_second_turn_direct_final_without_cr_count"
+            ],
+            "post_pz_second_turn_called_cr_count": summary["post_pz_second_turn_called_cr_count"],
+            "post_pz_second_turn_called_non_cr_tool_count": summary[
+                "post_pz_second_turn_called_non_cr_tool_count"
+            ],
+            key_name: key,
+        }
+    return payload
+
+
+def write_post_pz_transition_sidecars(
+    *,
+    prediction_records: list[dict[str, Any]],
+    metrics_dir: str | Path,
+) -> dict[str, str]:
+    """Write deterministic post-PZ transition summary artifacts."""
+
+    metrics_dir = Path(metrics_dir)
+    summary_path = metrics_dir / "post_pz_transition_summary.json"
+    per_dataset_path = metrics_dir / "per_dataset_post_pz_transition.json"
+    per_category_path = metrics_dir / "per_category_post_pz_transition.json"
+
+    write_json(summary_path, summarize_post_pz_transition(prediction_records))
+    write_json(
+        per_dataset_path,
+        {
+            "scope": "dataset",
+            "groups": grouped_post_pz_transition(
+                prediction_records,
+                key_name="dataset",
+                key_fn=lambda record: record["metadata"].get("sample_source_kind", "unknown"),
+            ),
+        },
+    )
+    write_json(
+        per_category_path,
+        {
+            "scope": "category",
+            "groups": grouped_post_pz_transition(
+                prediction_records,
+                key_name="category",
+                key_fn=lambda record: record["category"],
+            ),
+        },
+    )
+    return {
+        "post_pz_transition_summary": str(summary_path.resolve()),
+        "per_dataset_post_pz_transition": str(per_dataset_path.resolve()),
+        "per_category_post_pz_transition": str(per_category_path.resolve()),
     }
 
 

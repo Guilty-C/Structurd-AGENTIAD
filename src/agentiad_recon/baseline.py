@@ -27,7 +27,9 @@ from agentiad_recon.backends import (
 )
 from agentiad_recon.behavior_audit import (
     build_zero_tool_behavior_fields,
+    summarize_post_pz_transition,
     summarize_zero_tool_behavior,
+    write_post_pz_transition_sidecars,
     write_tool_first_strategy_summary,
     write_zero_tool_behavior_sidecars,
 )
@@ -463,6 +465,18 @@ def _prompt_audit_sidecar_path(raw_root: Path, *, seed: int, sample_slug: str) -
     return raw_root / f"seed_{seed}" / sample_slug / "prompt_audit.turn_0.json"
 
 
+def _post_pz_transition_sidecar_path(
+    raw_root: Path,
+    *,
+    seed: int,
+    sample_slug: str,
+    turn_index: int,
+) -> Path:
+    """Build the sidecar path for one post-PZ transition audit event."""
+
+    return raw_root / f"seed_{seed}" / sample_slug / f"post_pz_transition.turn_{turn_index}.json"
+
+
 def _sanitize_failure_detail(text: str) -> str:
     """Convert a free-form error detail into a stable machine-readable token."""
 
@@ -623,6 +637,169 @@ def _prompt_audit_summary(prediction_records: list[dict[str, Any]]) -> dict[str,
         if failed and (record.get("failure_reason") is None or not str(record["failure_reason"]).strip()):
             summary["failed_count_with_missing_reason_count"] += 1
     return summary
+
+
+def _render_history_prompt_surface(history: list[dict[str, Any]]) -> str:
+    """Render the current multi-message history into one inspectable prompt surface string."""
+
+    rendered_messages: list[str] = []
+    for index, message in enumerate(history):
+        header = f"[{index}] role={message['role']} message_type={message['message_type']}"
+        if message.get("tool_name") is not None:
+            header += f" tool_name={message['tool_name']}"
+        if message.get("call_id") is not None:
+            header += f" call_id={message['call_id']}"
+        lines = [header, str(message.get("content", ""))]
+        if message.get("image_refs"):
+            lines.append(f"image_refs={json.dumps(message['image_refs'], ensure_ascii=False)}")
+        rendered_messages.append("\n".join(lines))
+    return "\n\n".join(rendered_messages)
+
+
+def _post_pz_declared_available_tools(rendered_prompt_surface: str) -> list[str]:
+    """Infer which tools are still explicitly exposed on the post-PZ prompt surface."""
+
+    rendered_lower = rendered_prompt_surface.lower()
+    if "available tools: pz and cr" in rendered_lower:
+        return ["PZ", "CR"]
+    if "available tools: pz only" in rendered_lower:
+        return ["PZ"]
+
+    declared_available_tools: list[str] = []
+    if "crop_image_normalized" in rendered_lower or re.search(r"\bPZ\b", rendered_prompt_surface) is not None:
+        declared_available_tools.append("PZ")
+    if (
+        "query_image" in rendered_lower
+        or "same-category normal reference exemplar" in rendered_lower
+        or re.search(r"\bCR\b", rendered_prompt_surface) is not None
+    ) and "do not request cr in this mode" not in rendered_lower:
+        declared_available_tools.append("CR")
+    return declared_available_tools
+
+
+def _post_pz_transition_protocol_event_type(event: str) -> str:
+    """Normalize the post-PZ second-turn protocol event for audit surfaces."""
+
+    return event if event in {"tool_call", "final_answer"} else "parse_failure"
+
+
+def _post_pz_transition_payload(
+    *,
+    history: list[dict[str, Any]],
+    sample_id: str,
+    tool_mode: str,
+    first_tool_name: str,
+    first_tool_turn_index: int,
+    first_turn_gate_outcome: str,
+    first_turn_retry_repair_involved: bool,
+    post_pz_assistant_turn_index: int,
+    prior_tool_trace_count: int,
+) -> dict[str, Any]:
+    """Build one auditable snapshot of the prompt surface shown after the first successful PZ call."""
+
+    rendered_prompt_surface = _render_history_prompt_surface(history)
+    rendered_prompt_surface_digest = hashlib.sha256(
+        rendered_prompt_surface.encode("utf-8")
+    ).hexdigest()
+    rendered_prompt_surface_lower = rendered_prompt_surface.lower()
+    declared_available_tools = _post_pz_declared_available_tools(rendered_prompt_surface)
+    prompt_contains_pz_only = (
+        "pz_only" in rendered_prompt_surface_lower
+        or "available tools: pz only" in rendered_prompt_surface_lower
+        or "do not request cr in this mode" in rendered_prompt_surface_lower
+    )
+
+    pz_tool_result_messages = [
+        message
+        for message in history
+        if message["role"] == "tool"
+        and message["message_type"] == "tool_result"
+        and message.get("tool_name") == "PZ"
+    ]
+    latest_pz_tool_result = pz_tool_result_messages[-1] if pz_tool_result_messages else None
+    pz_result_reinserted_present = latest_pz_tool_result is not None
+    pz_result_reinserted_digest = None
+    if latest_pz_tool_result is not None:
+        pz_result_reinserted_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "tool_name": latest_pz_tool_result.get("tool_name"),
+                    "call_id": latest_pz_tool_result.get("call_id"),
+                    "content": latest_pz_tool_result.get("content"),
+                    "image_refs": latest_pz_tool_result.get("image_refs", []),
+                    "metadata": latest_pz_tool_result.get("metadata", {}),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    cr_available_in_prompt_surface = "CR" in declared_available_tools
+    query_image_instruction_present = any(
+        phrase in rendered_prompt_surface_lower
+        for phrase in (
+            "query_image",
+            "same-category normal reference exemplar",
+            "cr only when",
+            "available tools: pz and cr",
+        )
+    )
+    crop_image_normalized_reference_present = any(
+        phrase in rendered_prompt_surface_lower
+        for phrase in (
+            "crop_image_normalized",
+            "localized crop/zoom",
+            "tool_name=pz",
+            '"tool_name":"pz"',
+        )
+    )
+    tool_context_present = any(
+        message["role"] == "assistant"
+        and message["message_type"] == "tool_request"
+        and message.get("tool_name") == "PZ"
+        for message in history
+    ) and pz_result_reinserted_present
+
+    transition_mismatch_reasons: list[str] = []
+    if not pz_result_reinserted_present:
+        transition_mismatch_reasons.append("post_pz_transition_missing_reinserted_pz_result")
+    if not cr_available_in_prompt_surface:
+        transition_mismatch_reasons.append("post_pz_transition_missing_cr_tool")
+    if not query_image_instruction_present:
+        transition_mismatch_reasons.append("post_pz_transition_missing_query_image_instruction")
+    if prompt_contains_pz_only:
+        transition_mismatch_reasons.append("post_pz_transition_pz_only_leakage")
+    if not tool_context_present:
+        transition_mismatch_reasons.append("post_pz_transition_missing_tool_context")
+
+    return {
+        "sample_id": sample_id,
+        "tool_mode": tool_mode,
+        "first_tool_name": first_tool_name,
+        "first_tool_turn_index": first_tool_turn_index,
+        "first_turn_gate_outcome": first_turn_gate_outcome,
+        "first_turn_retry_repair_involved": first_turn_retry_repair_involved,
+        "post_pz_assistant_turn_index": post_pz_assistant_turn_index,
+        "prior_tool_trace_count": prior_tool_trace_count,
+        "pz_result_reinserted_present": pz_result_reinserted_present,
+        "pz_result_reinserted_digest": pz_result_reinserted_digest,
+        "rendered_prompt_surface": rendered_prompt_surface,
+        "rendered_prompt_surface_digest": rendered_prompt_surface_digest,
+        "declared_available_tools": declared_available_tools,
+        "cr_available_in_prompt_surface": cr_available_in_prompt_surface,
+        "query_image_instruction_present": query_image_instruction_present,
+        "crop_image_normalized_reference_present": crop_image_normalized_reference_present,
+        "transition_contract_valid_for_cr": not transition_mismatch_reasons,
+        "transition_mismatch_reasons": transition_mismatch_reasons,
+        "second_turn_raw_output_path": None,
+        "second_turn_protocol_event_type": None,
+        "second_turn_terminal_without_cr": False,
+        "second_turn_called_cr": False,
+        "second_turn_called_non_cr_tool": False,
+        "second_turn_parser_valid": None,
+        "second_turn_schema_valid": None,
+        "second_turn_failure_reason": None,
+    }
 
 
 def _first_turn_protocol_gate_retry_instruction() -> str:
@@ -992,6 +1169,19 @@ def run_baseline(
                 first_turn_gate_repair_original_failure_family=None,
                 first_turn_gate_repair_failure_family=None,
                 first_turn_gate_sidecar_path=None,
+                first_successful_tool_name=None,
+                first_successful_tool_turn_index=None,
+                post_pz_transition_audited=False,
+                post_pz_transition_sidecar_path=None,
+                post_pz_transition_contract_valid_for_cr=None,
+                post_pz_transition_mismatch_reasons=[],
+                post_pz_second_turn_protocol_event_type=None,
+                post_pz_second_turn_direct_final_without_cr=False,
+                post_pz_second_turn_called_cr=False,
+                post_pz_second_turn_called_non_cr_tool=False,
+                post_pz_second_turn_parser_valid=None,
+                post_pz_second_turn_schema_valid=None,
+                post_pz_second_turn_failure_reason=None,
                 metadata={
                     "backend_metadata": response.metadata,
                     "sample_source_kind": sample["metadata"].get("dataset_kind"),
@@ -1169,6 +1359,20 @@ def _tool_loop_sample(
     first_turn_gate_repair_failure_family: str | None = None
     first_turn_gate_sidecar: dict[str, Any] | None = None
     first_turn_gate_sidecar_path: Path | None = None
+    first_successful_tool_name: str | None = None
+    first_successful_tool_turn_index: int | None = None
+    post_pz_transition_audited = False
+    post_pz_transition_sidecar: dict[str, Any] | None = None
+    post_pz_transition_sidecar_path: Path | None = None
+    post_pz_transition_contract_valid_for_cr: bool | None = None
+    post_pz_transition_mismatch_reasons: list[str] = []
+    post_pz_second_turn_protocol_event_type: str | None = None
+    post_pz_second_turn_direct_final_without_cr = False
+    post_pz_second_turn_called_cr = False
+    post_pz_second_turn_called_non_cr_tool = False
+    post_pz_second_turn_parser_valid: bool | None = None
+    post_pz_second_turn_schema_valid: bool | None = None
+    post_pz_second_turn_failure_reason: str | None = None
     prompt_audit_path = _prompt_audit_sidecar_path(directories["raw_outputs"], seed=seed, sample_slug=sample_slug)
     prompt_audit = _prompt_audit_payload(
         prompt_bundle,
@@ -1252,9 +1456,109 @@ def _tool_loop_sample(
             }
         return decision, event, normalization_metadata
 
+    def _mark_first_successful_tool(*, tool_name: str, turn_index: int) -> None:
+        """Capture the first successfully executed tool without changing runtime behavior."""
+
+        nonlocal first_successful_tool_name
+        nonlocal first_successful_tool_turn_index
+        if first_successful_tool_name is None:
+            first_successful_tool_name = tool_name
+            first_successful_tool_turn_index = turn_index
+
+    def _start_post_pz_transition_audit(*, turn_index: int) -> None:
+        """Snapshot the prompt surface shown on the first assistant turn after PZ reinsertion."""
+
+        nonlocal post_pz_transition_audited
+        nonlocal post_pz_transition_sidecar
+        nonlocal post_pz_transition_sidecar_path
+        nonlocal post_pz_transition_contract_valid_for_cr
+        nonlocal post_pz_transition_mismatch_reasons
+        if (
+            definition["mode"] != "pz_cr"
+            or post_pz_transition_audited
+            or first_successful_tool_name != "PZ"
+            or first_successful_tool_turn_index is None
+            or not tool_traces
+        ):
+            return
+
+        post_pz_transition_audited = True
+        post_pz_transition_sidecar_path = _post_pz_transition_sidecar_path(
+            directories["raw_outputs"],
+            seed=seed,
+            sample_slug=sample_slug,
+            turn_index=turn_index,
+        )
+        post_pz_transition_sidecar = _post_pz_transition_payload(
+            history=history,
+            sample_id=sample["sample_id"],
+            tool_mode=definition["mode"],
+            first_tool_name=first_successful_tool_name,
+            first_tool_turn_index=first_successful_tool_turn_index,
+            first_turn_gate_outcome=first_turn_gate_outcome,
+            first_turn_retry_repair_involved=first_turn_gate_repair_succeeded,
+            post_pz_assistant_turn_index=turn_index,
+            prior_tool_trace_count=len(tool_traces),
+        )
+        post_pz_transition_contract_valid_for_cr = post_pz_transition_sidecar[
+            "transition_contract_valid_for_cr"
+        ]
+        post_pz_transition_mismatch_reasons = list(
+            post_pz_transition_sidecar["transition_mismatch_reasons"]
+        )
+
+    def _finalize_post_pz_transition_audit(
+        *,
+        turn_index: int,
+        raw_output_path: Path,
+        event: str,
+        second_turn_called_cr: bool,
+        second_turn_called_non_cr_tool: bool,
+        second_turn_parser_valid_value: bool | None,
+        second_turn_schema_valid_value: bool | None,
+        second_turn_failure_reason_value: str | None,
+    ) -> None:
+        """Write the post-PZ sidecar once the audited second turn has been classified."""
+
+        nonlocal post_pz_second_turn_protocol_event_type
+        nonlocal post_pz_second_turn_direct_final_without_cr
+        nonlocal post_pz_second_turn_called_cr
+        nonlocal post_pz_second_turn_called_non_cr_tool
+        nonlocal post_pz_second_turn_parser_valid
+        nonlocal post_pz_second_turn_schema_valid
+        nonlocal post_pz_second_turn_failure_reason
+        if (
+            post_pz_transition_sidecar is None
+            or post_pz_transition_sidecar_path is None
+            or post_pz_transition_sidecar["post_pz_assistant_turn_index"] != turn_index
+        ):
+            return
+
+        protocol_event_type = _post_pz_transition_protocol_event_type(event)
+        post_pz_second_turn_protocol_event_type = protocol_event_type
+        post_pz_second_turn_called_cr = second_turn_called_cr
+        post_pz_second_turn_called_non_cr_tool = second_turn_called_non_cr_tool
+        post_pz_second_turn_direct_final_without_cr = protocol_event_type == "final_answer" and not second_turn_called_cr
+        post_pz_second_turn_parser_valid = second_turn_parser_valid_value
+        post_pz_second_turn_schema_valid = second_turn_schema_valid_value
+        post_pz_second_turn_failure_reason = second_turn_failure_reason_value
+
+        post_pz_transition_sidecar["second_turn_raw_output_path"] = str(raw_output_path.resolve())
+        post_pz_transition_sidecar["second_turn_protocol_event_type"] = protocol_event_type
+        post_pz_transition_sidecar["second_turn_terminal_without_cr"] = (
+            post_pz_second_turn_direct_final_without_cr
+        )
+        post_pz_transition_sidecar["second_turn_called_cr"] = second_turn_called_cr
+        post_pz_transition_sidecar["second_turn_called_non_cr_tool"] = second_turn_called_non_cr_tool
+        post_pz_transition_sidecar["second_turn_parser_valid"] = second_turn_parser_valid_value
+        post_pz_transition_sidecar["second_turn_schema_valid"] = second_turn_schema_valid_value
+        post_pz_transition_sidecar["second_turn_failure_reason"] = second_turn_failure_reason_value
+        write_json(post_pz_transition_sidecar_path, post_pz_transition_sidecar)
+
     for turn_index in range(definition["max_tool_turns"] + 1):
         if prompt_audit["mode_contract_mismatch"]:
             break
+        _start_post_pz_transition_audit(turn_index=turn_index)
         request = BackendRequest(
             sample_id=sample["sample_id"],
             seed=seed,
@@ -1444,6 +1748,10 @@ def _tool_loop_sample(
                     )
                     tool_payload = tool_result.to_payload()
                     tool_traces.append(tool_payload)
+                    _mark_first_successful_tool(
+                        tool_name=tool_result.tool_name,
+                        turn_index=turn_index,
+                    )
                     history = reinsert_tool_result(history, tool_result)
                     continue
 
@@ -1470,6 +1778,19 @@ def _tool_loop_sample(
             if len(tool_traces) >= definition["max_tool_turns"]:
                 error_message = f"Exceeded max_tool_turns={definition['max_tool_turns']} before final answer"
                 failure_reason = "runtime_exception:exceeded_max_tool_turns"
+                parsed_call = decision.parsed_call
+                _finalize_post_pz_transition_audit(
+                    turn_index=turn_index,
+                    raw_output_path=raw_output_path,
+                    event=event,
+                    second_turn_called_cr=bool(parsed_call is not None and parsed_call.tool_name == "CR"),
+                    second_turn_called_non_cr_tool=bool(
+                        parsed_call is not None and parsed_call.tool_name != "CR"
+                    ),
+                    second_turn_parser_valid_value=None,
+                    second_turn_schema_valid_value=None,
+                    second_turn_failure_reason_value=failure_reason,
+                )
                 _append_tool_request(
                     history,
                     response.raw_output,
@@ -1489,6 +1810,16 @@ def _tool_loop_sample(
             except Exception as exc:  # noqa: BLE001 - explicit gate failure path.
                 error_message = str(exc)
                 failure_reason = _failure_reason("runtime_exception", str(exc))
+                _finalize_post_pz_transition_audit(
+                    turn_index=turn_index,
+                    raw_output_path=raw_output_path,
+                    event="continue",
+                    second_turn_called_cr=False,
+                    second_turn_called_non_cr_tool=False,
+                    second_turn_parser_valid_value=False,
+                    second_turn_schema_valid_value=False,
+                    second_turn_failure_reason_value=failure_reason,
+                )
                 _append_tool_request(
                     history,
                     response.raw_output,
@@ -1518,6 +1849,20 @@ def _tool_loop_sample(
             )
             tool_payload = tool_result.to_payload()
             tool_traces.append(tool_payload)
+            _mark_first_successful_tool(
+                tool_name=tool_result.tool_name,
+                turn_index=turn_index,
+            )
+            _finalize_post_pz_transition_audit(
+                turn_index=turn_index,
+                raw_output_path=raw_output_path,
+                event=event,
+                second_turn_called_cr=tool_result.tool_name == "CR",
+                second_turn_called_non_cr_tool=tool_result.tool_name != "CR",
+                second_turn_parser_valid_value=None,
+                second_turn_schema_valid_value=None,
+                second_turn_failure_reason_value=None,
+            )
             history = reinsert_tool_result(history, tool_result)
             continue
 
@@ -1531,6 +1876,16 @@ def _tool_loop_sample(
             except Exception as exc:  # noqa: BLE001 - explicit gate failure path.
                 error_message = str(exc)
                 failure_reason = _failure_reason("parser_invalid", str(exc))
+            _finalize_post_pz_transition_audit(
+                turn_index=turn_index,
+                raw_output_path=raw_output_path,
+                event=event,
+                second_turn_called_cr=False,
+                second_turn_called_non_cr_tool=False,
+                second_turn_parser_valid_value=parser_valid,
+                second_turn_schema_valid_value=schema_valid,
+                second_turn_failure_reason_value=failure_reason,
+            )
             _append_final_answer_message(
                 history,
                 response.raw_output,
@@ -1542,6 +1897,16 @@ def _tool_loop_sample(
 
         error_message = "Assistant output did not contain a valid tool call or final answer block"
         failure_reason = "runtime_exception:assistant_output_missing_contract_block"
+        _finalize_post_pz_transition_audit(
+            turn_index=turn_index,
+            raw_output_path=raw_output_path,
+            event=event,
+            second_turn_called_cr=False,
+            second_turn_called_non_cr_tool=False,
+            second_turn_parser_valid_value=False,
+            second_turn_schema_valid_value=False,
+            second_turn_failure_reason_value=failure_reason,
+        )
         _append_final_answer_message(
             history,
             response.raw_output,
@@ -1600,6 +1965,24 @@ def _tool_loop_sample(
                 str(first_turn_gate_sidecar_path.resolve()) if first_turn_gate_sidecar_path is not None else None
             ),
             "first_turn_gate": first_turn_gate_sidecar,
+            "first_successful_tool_name": first_successful_tool_name,
+            "first_successful_tool_turn_index": first_successful_tool_turn_index,
+            "post_pz_transition_audited": post_pz_transition_audited,
+            "post_pz_transition_sidecar_path": (
+                str(post_pz_transition_sidecar_path.resolve())
+                if post_pz_transition_sidecar_path is not None
+                else None
+            ),
+            "post_pz_transition_contract_valid_for_cr": post_pz_transition_contract_valid_for_cr,
+            "post_pz_transition_mismatch_reasons": post_pz_transition_mismatch_reasons,
+            "post_pz_second_turn_protocol_event_type": post_pz_second_turn_protocol_event_type,
+            "post_pz_second_turn_direct_final_without_cr": post_pz_second_turn_direct_final_without_cr,
+            "post_pz_second_turn_called_cr": post_pz_second_turn_called_cr,
+            "post_pz_second_turn_called_non_cr_tool": post_pz_second_turn_called_non_cr_tool,
+            "post_pz_second_turn_parser_valid": post_pz_second_turn_parser_valid,
+            "post_pz_second_turn_schema_valid": post_pz_second_turn_schema_valid,
+            "post_pz_second_turn_failure_reason": post_pz_second_turn_failure_reason,
+            "post_pz_transition": post_pz_transition_sidecar,
         },
     )
     trace_payload = trace.to_audit_payload()
@@ -1638,6 +2021,21 @@ def _tool_loop_sample(
         first_turn_gate_sidecar_path=(
             str(first_turn_gate_sidecar_path.resolve()) if first_turn_gate_sidecar_path is not None else None
         ),
+        first_successful_tool_name=first_successful_tool_name,
+        first_successful_tool_turn_index=first_successful_tool_turn_index,
+        post_pz_transition_audited=post_pz_transition_audited,
+        post_pz_transition_sidecar_path=(
+            str(post_pz_transition_sidecar_path.resolve()) if post_pz_transition_sidecar_path is not None else None
+        ),
+        post_pz_transition_contract_valid_for_cr=post_pz_transition_contract_valid_for_cr,
+        post_pz_transition_mismatch_reasons=post_pz_transition_mismatch_reasons,
+        post_pz_second_turn_protocol_event_type=post_pz_second_turn_protocol_event_type,
+        post_pz_second_turn_direct_final_without_cr=post_pz_second_turn_direct_final_without_cr,
+        post_pz_second_turn_called_cr=post_pz_second_turn_called_cr,
+        post_pz_second_turn_called_non_cr_tool=post_pz_second_turn_called_non_cr_tool,
+        post_pz_second_turn_parser_valid=post_pz_second_turn_parser_valid,
+        post_pz_second_turn_schema_valid=post_pz_second_turn_schema_valid,
+        post_pz_second_turn_failure_reason=post_pz_second_turn_failure_reason,
         metadata={
             "sample_source_kind": sample["metadata"].get("dataset_kind"),
             "tool_trace_count": len(tool_traces),
@@ -1667,6 +2065,24 @@ def _tool_loop_sample(
                 str(first_turn_gate_sidecar_path.resolve()) if first_turn_gate_sidecar_path is not None else None
             ),
             "first_turn_gate": first_turn_gate_sidecar,
+            "first_successful_tool_name": first_successful_tool_name,
+            "first_successful_tool_turn_index": first_successful_tool_turn_index,
+            "post_pz_transition_audited": post_pz_transition_audited,
+            "post_pz_transition_sidecar_path": (
+                str(post_pz_transition_sidecar_path.resolve())
+                if post_pz_transition_sidecar_path is not None
+                else None
+            ),
+            "post_pz_transition_contract_valid_for_cr": post_pz_transition_contract_valid_for_cr,
+            "post_pz_transition_mismatch_reasons": post_pz_transition_mismatch_reasons,
+            "post_pz_second_turn_protocol_event_type": post_pz_second_turn_protocol_event_type,
+            "post_pz_second_turn_direct_final_without_cr": post_pz_second_turn_direct_final_without_cr,
+            "post_pz_second_turn_called_cr": post_pz_second_turn_called_cr,
+            "post_pz_second_turn_called_non_cr_tool": post_pz_second_turn_called_non_cr_tool,
+            "post_pz_second_turn_parser_valid": post_pz_second_turn_parser_valid,
+            "post_pz_second_turn_schema_valid": post_pz_second_turn_schema_valid,
+            "post_pz_second_turn_failure_reason": post_pz_second_turn_failure_reason,
+            "post_pz_transition": post_pz_transition_sidecar,
             "runtime_provenance": _resolved_runtime_provenance(
                 definition,
                 runtime_config,
@@ -1731,12 +2147,17 @@ def run_tool_augmented(
     normalization_summary = _normalization_summary(prediction_records)
     prompt_audit_summary = _prompt_audit_summary(prediction_records)
     zero_tool_behavior_summary = summarize_zero_tool_behavior(prediction_records)
+    post_pz_transition_summary = summarize_post_pz_transition(prediction_records)
     first_turn_gate_summary = _first_turn_gate_summary(prediction_records)
     first_turn_gate_repair_summary = _first_turn_gate_repair_summary(prediction_records)
     first_turn_gate_repair_failure_families = _first_turn_gate_repair_failure_family_artifact(
         prediction_records
     )
     zero_tool_sidecars = write_zero_tool_behavior_sidecars(
+        prediction_records=prediction_records,
+        metrics_dir=directories["metrics"],
+    )
+    post_pz_transition_sidecars = write_post_pz_transition_sidecars(
         prediction_records=prediction_records,
         metrics_dir=directories["metrics"],
     )
@@ -1760,6 +2181,7 @@ def run_tool_augmented(
         first_turn_protocol_gate_mode=runtime_provenance["first_turn_protocol_gate_mode"],
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
+        post_pz_transition_summary=post_pz_transition_summary,
         first_turn_gate_summary=first_turn_gate_summary,
         first_turn_gate_repair_summary=first_turn_gate_repair_summary,
     )
@@ -1841,6 +2263,9 @@ def run_tool_augmented(
             "delta_report": str(delta_report_path.resolve()),
             "per_dataset_zero_tool_behavior": zero_tool_sidecars["per_dataset_zero_tool_behavior"],
             "per_category_zero_tool_behavior": zero_tool_sidecars["per_category_zero_tool_behavior"],
+            "post_pz_transition_summary": post_pz_transition_sidecars["post_pz_transition_summary"],
+            "per_dataset_post_pz_transition": post_pz_transition_sidecars["per_dataset_post_pz_transition"],
+            "per_category_post_pz_transition": post_pz_transition_sidecars["per_category_post_pz_transition"],
             "first_turn_gate_repair_failure_families": str(
                 first_turn_gate_repair_failure_families_path.resolve()
             ),
@@ -1852,6 +2277,7 @@ def run_tool_augmented(
         normalization_summary=normalization_summary,
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
+        post_pz_transition_summary=post_pz_transition_summary,
         first_turn_gate_summary=first_turn_gate_summary,
         first_turn_gate_repair_summary=first_turn_gate_repair_summary,
     )
@@ -1877,6 +2303,7 @@ def run_tool_augmented(
         "normalization_summary": normalization_summary,
         "prompt_audit_summary": prompt_audit_summary,
         "zero_tool_behavior_summary": zero_tool_behavior_summary,
+        "post_pz_transition_summary": post_pz_transition_summary,
         "first_turn_gate_summary": first_turn_gate_summary,
         "first_turn_gate_repair_summary": first_turn_gate_repair_summary,
         "notes": [

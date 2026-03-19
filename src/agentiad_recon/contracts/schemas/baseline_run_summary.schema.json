@@ -152,6 +152,42 @@
         "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
       }
     },
+    "post_pz_transition_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "post_pz_transition_event_count",
+        "samples_with_post_pz_transition_events",
+        "post_pz_transition_contract_valid_count",
+        "post_pz_transition_contract_mismatch_count",
+        "post_pz_transition_missing_reinserted_pz_result_count",
+        "post_pz_transition_missing_cr_tool_count",
+        "post_pz_transition_missing_query_image_instruction_count",
+        "post_pz_transition_pz_only_leakage_count",
+        "post_pz_transition_missing_tool_context_count",
+        "post_pz_second_turn_direct_final_without_cr_count",
+        "post_pz_second_turn_called_cr_count",
+        "post_pz_second_turn_called_non_cr_tool_count",
+        "post_pz_second_turn_parser_failure_count",
+        "failed_count_with_missing_reason_count"
+      ],
+      "properties": {
+        "post_pz_transition_event_count": { "type": "integer", "minimum": 0 },
+        "samples_with_post_pz_transition_events": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_contract_valid_count": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_contract_mismatch_count": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_missing_reinserted_pz_result_count": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_missing_cr_tool_count": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_missing_query_image_instruction_count": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_pz_only_leakage_count": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_missing_tool_context_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_direct_final_without_cr_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_called_cr_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_called_non_cr_tool_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_parser_failure_count": { "type": "integer", "minimum": 0 },
+        "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "first_turn_gate_summary": {
       "type": "object",
       "additionalProperties": false,
@@ -247,6 +283,9 @@
         "delta_report": { "type": "string" },
         "per_dataset_zero_tool_behavior": { "type": "string", "minLength": 1 },
         "per_category_zero_tool_behavior": { "type": "string", "minLength": 1 },
+        "post_pz_transition_summary": { "type": "string", "minLength": 1 },
+        "per_dataset_post_pz_transition": { "type": "string", "minLength": 1 },
+        "per_category_post_pz_transition": { "type": "string", "minLength": 1 },
         "first_turn_gate_repair_failure_families": { "type": "string", "minLength": 1 },
         "tool_first_strategy_summary": { "type": "string", "minLength": 1 }
       }
