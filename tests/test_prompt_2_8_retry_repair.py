@@ -114,7 +114,10 @@ class Prompt28RetryRepairTests(unittest.TestCase):
 
         self.assertTrue(decision.attempted)
         self.assertFalse(decision.succeeded)
-        self.assertIn("explicit bbox payload", decision.error)
+        self.assertEqual(
+            decision.failure_family,
+            "retry_repair_unrecoverable_pseudo_observation_payload",
+        )
 
     def test_normal_parser_path_remains_strict(self) -> None:
         """Prompt 2.8 must not relax strict parsing outside the retry-only gate path."""
@@ -184,9 +187,20 @@ class Prompt28RetryRepairTests(unittest.TestCase):
         self.assertFalse(record["first_turn_gate_repair_succeeded"])
         self.assertEqual(record["first_turn_gate_repair_outcome"], "repair_failed")
         self.assertEqual(record["tool_call_count"], 0)
-        self.assertEqual(record["failure_reason"], "runtime_exception:first_turn_gate_retry_repair_failed")
+        self.assertEqual(
+            record["failure_reason"],
+            "runtime_exception:retry_repair_unrecoverable_pseudo_observation_payload",
+        )
+        self.assertEqual(
+            record["first_turn_gate_repair_failure_family"],
+            "retry_repair_unrecoverable_pseudo_observation_payload",
+        )
         self.assertEqual(sidecar["retry_repair"]["original_text"], PSEUDO_TOOL_JSON)
         self.assertIsNone(sidecar["retry_repair"]["repaired_text"])
+        self.assertEqual(
+            sidecar["retry_repair"]["failure_family"],
+            "retry_repair_unrecoverable_pseudo_observation_payload",
+        )
 
     def test_run_outputs_include_repair_aggregates(self) -> None:
         """Summary, metrics, and manifest should expose repair aggregate counters."""
@@ -219,8 +233,14 @@ class Prompt28RetryRepairTests(unittest.TestCase):
             self.assertEqual(repair["first_turn_gate_repair_success_count"], 1)
             self.assertEqual(repair["first_turn_gate_repair_failure_count"], 0)
             self.assertEqual(repair["first_turn_gate_repair_wrapper_recovery_count"], 1)
+            self.assertEqual(repair["first_turn_gate_repair_duplicate_candidate_deduplication_count"], 0)
             self.assertEqual(repair["first_turn_gate_repair_alias_canonicalization_count"], 1)
             self.assertEqual(repair["first_turn_gate_repair_bbox_canonicalization_count"], 1)
+            self.assertEqual(
+                repair["first_turn_gate_repair_failure_families"]["retry_repair_no_unique_candidate"],
+                0,
+            )
+            self.assertEqual(repair["failed_count_with_missing_reason_count"], 0)
 
 
 if __name__ == "__main__":

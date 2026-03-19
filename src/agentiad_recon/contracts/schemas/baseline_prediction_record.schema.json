@@ -34,6 +34,8 @@
     "first_turn_gate_repair_succeeded",
     "first_turn_gate_repair_outcome",
     "first_turn_gate_repair_categories",
+    "first_turn_gate_repair_original_failure_family",
+    "first_turn_gate_repair_failure_family",
     "first_turn_gate_sidecar_path",
     "first_protocol_event_type",
     "first_assistant_output_terminal",
@@ -113,10 +115,25 @@
         "enum": [
           "wrapper_recovery",
           "quote_normalization",
+          "duplicate_candidate_deduplication",
           "alias_canonicalization",
           "bbox_canonicalization"
         ]
       }
+    },
+    "first_turn_gate_repair_original_failure_family": {
+      "type": ["string", "null"]
+    },
+    "first_turn_gate_repair_failure_family": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "retry_repair_unrecoverable_pseudo_observation_payload",
+        "retry_repair_ambiguous_multiple_candidates",
+        "retry_repair_bbox_not_losslessly_recoverable",
+        "retry_repair_unsupported_payload_shape",
+        "retry_repair_no_unique_candidate"
+      ]
     },
     "first_turn_gate_sidecar_path": {
       "type": ["string", "null"]

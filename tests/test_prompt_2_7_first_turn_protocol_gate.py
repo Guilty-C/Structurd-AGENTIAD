@@ -224,7 +224,7 @@ class Prompt27FirstTurnGateTests(unittest.TestCase):
         self.assertTrue(record["first_turn_gate_triggered"])
         self.assertEqual(record["first_turn_gate_outcome"], "retry_parse_failure")
         self.assertEqual(record["first_turn_gate_retry_count"], 1)
-        self.assertTrue(record["failure_reason"].startswith("runtime_exception:first_turn_gate_retry"))
+        self.assertEqual(record["failure_reason"], "runtime_exception:retry_repair_no_unique_candidate")
         self.assertEqual(backend.calls, 2)
 
     def test_run_summary_gate_counts_match_prediction_records(self) -> None:

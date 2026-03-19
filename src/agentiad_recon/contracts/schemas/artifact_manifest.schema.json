@@ -218,8 +218,11 @@
         "first_turn_gate_repair_failure_count",
         "first_turn_gate_repair_wrapper_recovery_count",
         "first_turn_gate_repair_quote_normalization_count",
+        "first_turn_gate_repair_duplicate_candidate_deduplication_count",
         "first_turn_gate_repair_alias_canonicalization_count",
-        "first_turn_gate_repair_bbox_canonicalization_count"
+        "first_turn_gate_repair_bbox_canonicalization_count",
+        "first_turn_gate_repair_failure_families",
+        "failed_count_with_missing_reason_count"
       ],
       "properties": {
         "first_turn_gate_repair_attempt_count": { "type": "integer", "minimum": 0 },
@@ -227,8 +230,28 @@
         "first_turn_gate_repair_failure_count": { "type": "integer", "minimum": 0 },
         "first_turn_gate_repair_wrapper_recovery_count": { "type": "integer", "minimum": 0 },
         "first_turn_gate_repair_quote_normalization_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_repair_duplicate_candidate_deduplication_count": { "type": "integer", "minimum": 0 },
         "first_turn_gate_repair_alias_canonicalization_count": { "type": "integer", "minimum": 0 },
-        "first_turn_gate_repair_bbox_canonicalization_count": { "type": "integer", "minimum": 0 }
+        "first_turn_gate_repair_bbox_canonicalization_count": { "type": "integer", "minimum": 0 },
+        "first_turn_gate_repair_failure_families": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "retry_repair_unrecoverable_pseudo_observation_payload",
+            "retry_repair_ambiguous_multiple_candidates",
+            "retry_repair_bbox_not_losslessly_recoverable",
+            "retry_repair_unsupported_payload_shape",
+            "retry_repair_no_unique_candidate"
+          ],
+          "properties": {
+            "retry_repair_unrecoverable_pseudo_observation_payload": { "type": "integer", "minimum": 0 },
+            "retry_repair_ambiguous_multiple_candidates": { "type": "integer", "minimum": 0 },
+            "retry_repair_bbox_not_losslessly_recoverable": { "type": "integer", "minimum": 0 },
+            "retry_repair_unsupported_payload_shape": { "type": "integer", "minimum": 0 },
+            "retry_repair_no_unique_candidate": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
       }
     },
     "notes": {
