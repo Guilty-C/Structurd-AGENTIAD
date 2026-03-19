@@ -44,6 +44,10 @@
       "type": "string",
       "enum": ["off", "retry_once_pz_cr"]
     },
+    "post_pz_second_turn_gate_mode": {
+      "type": "string",
+      "enum": ["off", "retry_once_require_cr_after_pz"]
+    },
     "prompt_audit_summary": {
       "type": "object",
       "additionalProperties": false,
@@ -153,6 +157,37 @@
         "post_pz_transition_post_sanitation_contract_mismatch_count": { "type": "integer", "minimum": 0 },
         "post_pz_second_turn_direct_final_without_cr_count": { "type": "integer", "minimum": 0 },
         "post_pz_second_turn_called_cr_count": { "type": "integer", "minimum": 0 },
+        "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "post_pz_second_turn_gate_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "post_pz_second_turn_gate_trigger_count",
+        "samples_with_post_pz_second_turn_gate_events",
+        "post_pz_second_turn_gate_recovered_to_cr_call_count",
+        "post_pz_second_turn_gate_retry_parse_failure_count",
+        "post_pz_second_turn_gate_still_terminal_count",
+        "post_pz_second_turn_gate_called_non_cr_tool_count",
+        "post_pz_second_turn_gate_called_cr_but_later_failed_execution_or_contract_count",
+        "post_pz_second_turn_gate_not_triggered_count",
+        "post_pz_second_turn_gate_recovery_rate",
+        "failed_count_with_missing_reason_count"
+      ],
+      "properties": {
+        "post_pz_second_turn_gate_trigger_count": { "type": "integer", "minimum": 0 },
+        "samples_with_post_pz_second_turn_gate_events": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_gate_recovered_to_cr_call_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_gate_retry_parse_failure_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_gate_still_terminal_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_gate_called_non_cr_tool_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_gate_called_cr_but_later_failed_execution_or_contract_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "post_pz_second_turn_gate_not_triggered_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_gate_recovery_rate": { "type": "number", "minimum": 0, "maximum": 1 },
         "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
       }
     },
@@ -359,7 +394,8 @@
         "dtype",
         "device",
         "tool_first_intervention_strategy",
-        "first_turn_protocol_gate_mode"
+        "first_turn_protocol_gate_mode",
+        "post_pz_second_turn_gate_mode"
       ],
       "properties": {
         "runtime_backend_name": { "type": "string", "minLength": 1 },
@@ -394,6 +430,10 @@
         "first_turn_protocol_gate_mode": {
           "type": "string",
           "enum": ["off", "retry_once_pz_cr"]
+        },
+        "post_pz_second_turn_gate_mode": {
+          "type": "string",
+          "enum": ["off", "retry_once_require_cr_after_pz"]
         }
       }
     }

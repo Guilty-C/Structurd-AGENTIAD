@@ -318,6 +318,67 @@ def summarize_post_pz_transition_sanitation(prediction_records: list[dict[str, A
     }
 
 
+def summarize_post_pz_second_turn_gate(prediction_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate bounded post-PZ second-turn gate outcomes across prediction records."""
+
+    trigger_records = [
+        record for record in prediction_records if record.get("post_pz_second_turn_gate_triggered")
+    ]
+    trigger_count = len(trigger_records)
+    failed_count_with_missing_reason_count = sum(
+        1
+        for record in trigger_records
+        if record.get("post_pz_second_turn_gate_outcome")
+        in {
+            "retry_parse_failure",
+            "called_non_cr_tool_after_retry",
+            "called_cr_but_later_failed_execution_or_contract",
+        }
+        and (
+            record.get("post_pz_second_turn_gate_retry_failure_reason") is None
+            or not str(record["post_pz_second_turn_gate_retry_failure_reason"]).strip()
+        )
+    )
+    return {
+        "post_pz_second_turn_gate_trigger_count": trigger_count,
+        "samples_with_post_pz_second_turn_gate_events": trigger_count,
+        "post_pz_second_turn_gate_recovered_to_cr_call_count": sum(
+            1 for record in trigger_records if record.get("post_pz_second_turn_gate_outcome") == "recovered_to_cr_call"
+        ),
+        "post_pz_second_turn_gate_retry_parse_failure_count": sum(
+            1 for record in trigger_records if record.get("post_pz_second_turn_gate_outcome") == "retry_parse_failure"
+        ),
+        "post_pz_second_turn_gate_still_terminal_count": sum(
+            1 for record in trigger_records if record.get("post_pz_second_turn_gate_outcome") == "still_terminal_after_retry"
+        ),
+        "post_pz_second_turn_gate_called_non_cr_tool_count": sum(
+            1
+            for record in trigger_records
+            if record.get("post_pz_second_turn_gate_outcome") == "called_non_cr_tool_after_retry"
+        ),
+        "post_pz_second_turn_gate_called_cr_but_later_failed_execution_or_contract_count": sum(
+            1
+            for record in trigger_records
+            if record.get("post_pz_second_turn_gate_outcome")
+            == "called_cr_but_later_failed_execution_or_contract"
+        ),
+        "post_pz_second_turn_gate_not_triggered_count": sum(
+            1 for record in prediction_records if record.get("post_pz_second_turn_gate_outcome") == "gate_not_triggered"
+        ),
+        "post_pz_second_turn_gate_recovery_rate": (
+            sum(
+                1
+                for record in trigger_records
+                if record.get("post_pz_second_turn_gate_outcome") == "recovered_to_cr_call"
+            )
+            / trigger_count
+        )
+        if trigger_count
+        else 0.0,
+        "failed_count_with_missing_reason_count": failed_count_with_missing_reason_count,
+    }
+
+
 def grouped_post_pz_transition(
     prediction_records: list[dict[str, Any]],
     *,
@@ -476,6 +537,19 @@ def write_post_pz_transition_sanitation_sidecars(
         "per_dataset_post_pz_transition_sanitation": str(per_dataset_path.resolve()),
         "per_category_post_pz_transition_sanitation": str(per_category_path.resolve()),
     }
+
+
+def write_post_pz_second_turn_gate_summary(
+    *,
+    prediction_records: list[dict[str, Any]],
+    metrics_dir: str | Path,
+) -> str:
+    """Write one deterministic bounded post-PZ second-turn gate summary artifact."""
+
+    metrics_dir = Path(metrics_dir)
+    summary_path = metrics_dir / "post_pz_second_turn_gate_summary.json"
+    write_json(summary_path, summarize_post_pz_second_turn_gate(prediction_records))
+    return str(summary_path.resolve())
 
 
 def write_tool_first_strategy_summary(

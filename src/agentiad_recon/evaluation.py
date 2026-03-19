@@ -79,6 +79,7 @@ def build_prediction_record(
     raw_output_sha256: str,
     trace_path: str,
     first_turn_protocol_gate_mode: str,
+    post_pz_second_turn_gate_mode: str,
     first_turn_gate_triggered: bool,
     first_turn_gate_retry_count: int,
     first_turn_gate_recovered: bool,
@@ -112,6 +113,15 @@ def build_prediction_record(
     post_pz_second_turn_parser_valid: bool | None,
     post_pz_second_turn_schema_valid: bool | None,
     post_pz_second_turn_failure_reason: str | None,
+    post_pz_second_turn_gate_triggered: bool,
+    post_pz_second_turn_gate_outcome: str,
+    post_pz_second_turn_gate_retry_attempted: bool,
+    post_pz_second_turn_gate_retry_called_tool_name: str | None,
+    post_pz_second_turn_gate_retry_parser_valid: bool | None,
+    post_pz_second_turn_gate_retry_schema_valid: bool | None,
+    post_pz_second_turn_gate_retry_failure_reason: str | None,
+    post_pz_second_turn_gate_retry_raw_output_path: str | None,
+    post_pz_second_turn_gate_sidecar_path: str | None,
     first_protocol_event_type: str,
     first_assistant_output_terminal: bool,
     tool_call_count: int,
@@ -145,6 +155,7 @@ def build_prediction_record(
         "raw_output_sha256": raw_output_sha256,
         "trace_path": trace_path,
         "first_turn_protocol_gate_mode": first_turn_protocol_gate_mode,
+        "post_pz_second_turn_gate_mode": post_pz_second_turn_gate_mode,
         "first_turn_gate_triggered": first_turn_gate_triggered,
         "first_turn_gate_retry_count": first_turn_gate_retry_count,
         "first_turn_gate_recovered": first_turn_gate_recovered,
@@ -190,6 +201,15 @@ def build_prediction_record(
         "post_pz_second_turn_parser_valid": post_pz_second_turn_parser_valid,
         "post_pz_second_turn_schema_valid": post_pz_second_turn_schema_valid,
         "post_pz_second_turn_failure_reason": post_pz_second_turn_failure_reason,
+        "post_pz_second_turn_gate_triggered": post_pz_second_turn_gate_triggered,
+        "post_pz_second_turn_gate_outcome": post_pz_second_turn_gate_outcome,
+        "post_pz_second_turn_gate_retry_attempted": post_pz_second_turn_gate_retry_attempted,
+        "post_pz_second_turn_gate_retry_called_tool_name": post_pz_second_turn_gate_retry_called_tool_name,
+        "post_pz_second_turn_gate_retry_parser_valid": post_pz_second_turn_gate_retry_parser_valid,
+        "post_pz_second_turn_gate_retry_schema_valid": post_pz_second_turn_gate_retry_schema_valid,
+        "post_pz_second_turn_gate_retry_failure_reason": post_pz_second_turn_gate_retry_failure_reason,
+        "post_pz_second_turn_gate_retry_raw_output_path": post_pz_second_turn_gate_retry_raw_output_path,
+        "post_pz_second_turn_gate_sidecar_path": post_pz_second_turn_gate_sidecar_path,
         "first_protocol_event_type": first_protocol_event_type,
         "first_assistant_output_terminal": first_assistant_output_terminal,
         "tool_call_count": tool_call_count,
@@ -280,12 +300,14 @@ def build_metrics_report(
     runtime_provenance: dict[str, Any],
     tool_first_intervention_strategy: str | None = None,
     first_turn_protocol_gate_mode: str | None = None,
+    post_pz_second_turn_gate_mode: str | None = None,
     prompt_audit_summary: dict[str, int] | None = None,
     zero_tool_behavior_summary: dict[str, Any] | None = None,
     first_turn_gate_summary: dict[str, Any] | None = None,
     first_turn_gate_repair_summary: dict[str, Any] | None = None,
     post_pz_transition_summary: dict[str, Any] | None = None,
     post_pz_transition_sanitation_summary: dict[str, Any] | None = None,
+    post_pz_second_turn_gate_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-seed, per-class, and mean/std inference metrics."""
 
@@ -357,6 +379,8 @@ def build_metrics_report(
         report["tool_first_intervention_strategy"] = tool_first_intervention_strategy
     if first_turn_protocol_gate_mode is not None:
         report["first_turn_protocol_gate_mode"] = first_turn_protocol_gate_mode
+    if post_pz_second_turn_gate_mode is not None:
+        report["post_pz_second_turn_gate_mode"] = post_pz_second_turn_gate_mode
     if prompt_audit_summary is not None:
         report["prompt_audit_summary"] = prompt_audit_summary
     if zero_tool_behavior_summary is not None:
@@ -369,6 +393,8 @@ def build_metrics_report(
         report["post_pz_transition_summary"] = post_pz_transition_summary
     if post_pz_transition_sanitation_summary is not None:
         report["post_pz_transition_sanitation_summary"] = post_pz_transition_sanitation_summary
+    if post_pz_second_turn_gate_summary is not None:
+        report["post_pz_second_turn_gate_summary"] = post_pz_second_turn_gate_summary
     validate_payload(report, "baseline_metrics_report.schema.json")
     return report
 
@@ -403,6 +429,7 @@ def build_run_summary(
     notes: list[str] | None = None,
     tool_first_intervention_strategy: str | None = None,
     first_turn_protocol_gate_mode: str | None = None,
+    post_pz_second_turn_gate_mode: str | None = None,
     normalization_summary: dict[str, int] | None = None,
     prompt_audit_summary: dict[str, int] | None = None,
     zero_tool_behavior_summary: dict[str, Any] | None = None,
@@ -410,6 +437,7 @@ def build_run_summary(
     first_turn_gate_repair_summary: dict[str, Any] | None = None,
     post_pz_transition_summary: dict[str, Any] | None = None,
     post_pz_transition_sanitation_summary: dict[str, Any] | None = None,
+    post_pz_second_turn_gate_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one compact summary manifest for the evidence package."""
 
@@ -450,6 +478,8 @@ def build_run_summary(
         summary["tool_first_intervention_strategy"] = tool_first_intervention_strategy
     if first_turn_protocol_gate_mode is not None:
         summary["first_turn_protocol_gate_mode"] = first_turn_protocol_gate_mode
+    if post_pz_second_turn_gate_mode is not None:
+        summary["post_pz_second_turn_gate_mode"] = post_pz_second_turn_gate_mode
     if normalization_summary is not None:
         summary["normalization_summary"] = normalization_summary
     if prompt_audit_summary is not None:
@@ -464,6 +494,8 @@ def build_run_summary(
         summary["post_pz_transition_summary"] = post_pz_transition_summary
     if post_pz_transition_sanitation_summary is not None:
         summary["post_pz_transition_sanitation_summary"] = post_pz_transition_sanitation_summary
+    if post_pz_second_turn_gate_summary is not None:
+        summary["post_pz_second_turn_gate_summary"] = post_pz_second_turn_gate_summary
     validate_payload(summary, "baseline_run_summary.schema.json")
     return summary
 

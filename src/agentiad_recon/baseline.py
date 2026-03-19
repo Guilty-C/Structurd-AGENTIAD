@@ -28,8 +28,10 @@ from agentiad_recon.backends import (
 from agentiad_recon.behavior_audit import (
     build_zero_tool_behavior_fields,
     summarize_post_pz_transition,
+    summarize_post_pz_second_turn_gate,
     summarize_post_pz_transition_sanitation,
     summarize_zero_tool_behavior,
+    write_post_pz_second_turn_gate_summary,
     write_post_pz_transition_sidecars,
     write_post_pz_transition_sanitation_sidecars,
     write_tool_first_strategy_summary,
@@ -73,6 +75,7 @@ from agentiad_recon.traces import TraceMessage, TraceRecord
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIRST_TURN_PROTOCOL_GATE_MODES = ("off", "retry_once_pz_cr")
+POST_PZ_SECOND_TURN_GATE_MODES = ("off", "retry_once_require_cr_after_pz")
 
 
 class InferenceRunError(RuntimeError):
@@ -140,6 +143,7 @@ def _runtime_defaults() -> dict[str, Any]:
         },
         "tool_first_intervention_strategy": "baseline",
         "first_turn_protocol_gate_mode": "off",
+        "post_pz_second_turn_gate_mode": "off",
     }
 
 
@@ -168,6 +172,7 @@ def _runtime_config(
         "device",
         "tool_first_intervention_strategy",
         "first_turn_protocol_gate_mode",
+        "post_pz_second_turn_gate_mode",
     ):
         if runtime_overrides and key in runtime_overrides and runtime_overrides[key] is not None:
             config[key] = runtime_overrides[key]
@@ -186,6 +191,11 @@ def _runtime_config(
         raise InferenceRunError(
             "Unsupported first_turn_protocol_gate_mode: "
             f"{config['first_turn_protocol_gate_mode']!r}"
+        )
+    if config["post_pz_second_turn_gate_mode"] not in POST_PZ_SECOND_TURN_GATE_MODES:
+        raise InferenceRunError(
+            "Unsupported post_pz_second_turn_gate_mode: "
+            f"{config['post_pz_second_turn_gate_mode']!r}"
         )
 
     resolved_dataset_root = _resolve_path(dataset_root or definition["sample_source"]["path"])
@@ -226,6 +236,7 @@ def _resolved_runtime_provenance(
         "device": runtime_config["device"],
         "tool_first_intervention_strategy": runtime_config["tool_first_intervention_strategy"],
         "first_turn_protocol_gate_mode": runtime_config["first_turn_protocol_gate_mode"],
+        "post_pz_second_turn_gate_mode": runtime_config["post_pz_second_turn_gate_mode"],
     }
 
 
@@ -387,6 +398,8 @@ def _append_runtime_gate_reminder(
     reminder_text: str,
     *,
     gate_mode: str,
+    runtime_intervention: str = "first_turn_protocol_gate",
+    gate_mode_metadata_key: str = "first_turn_protocol_gate_mode",
 ) -> None:
     """Append the auditable user-side runtime reminder used by the protocol gate."""
 
@@ -397,8 +410,8 @@ def _append_runtime_gate_reminder(
             "content": reminder_text,
             "image_refs": [],
             "metadata": {
-                "runtime_intervention": "first_turn_protocol_gate",
-                "first_turn_protocol_gate_mode": gate_mode,
+                "runtime_intervention": runtime_intervention,
+                gate_mode_metadata_key: gate_mode,
             },
             "tool_name": None,
             "call_id": None,
@@ -477,6 +490,18 @@ def _post_pz_transition_sidecar_path(
     """Build the sidecar path for one post-PZ transition audit event."""
 
     return raw_root / f"seed_{seed}" / sample_slug / f"post_pz_transition.turn_{turn_index}.json"
+
+
+def _post_pz_second_turn_gate_sidecar_path(
+    raw_root: Path,
+    *,
+    seed: int,
+    sample_slug: str,
+    turn_index: int,
+) -> Path:
+    """Build the sidecar path for one bounded post-PZ second-turn gate event."""
+
+    return raw_root / f"seed_{seed}" / sample_slug / f"post_pz_second_turn_gate.turn_{turn_index}.json"
 
 
 def _sanitize_failure_detail(text: str) -> str:
@@ -710,6 +735,47 @@ def _message_contains_pz_only_leakage(message: dict[str, Any]) -> bool:
     )
 
 
+def _remove_assistant_messages_before_runtime_intervention(
+    history: list[dict[str, Any]],
+    *,
+    runtime_intervention: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Remove superseded assistant messages immediately before one runtime reminder."""
+
+    sanitized_history = _clone_history(history)
+    reminder_index: int | None = None
+    for index, message in enumerate(sanitized_history):
+        if (
+            message["role"] == "user"
+            and message.get("metadata", {}).get("runtime_intervention") == runtime_intervention
+        ):
+            reminder_index = index
+
+    if reminder_index is None:
+        return sanitized_history, []
+
+    prior_user_index = None
+    for index in range(reminder_index - 1, -1, -1):
+        if sanitized_history[index]["role"] == "user":
+            prior_user_index = index
+            break
+
+    removal_indices = [
+        index
+        for index in range((prior_user_index or -1) + 1, reminder_index)
+        if sanitized_history[index]["role"] == "assistant"
+    ]
+    if not removal_indices:
+        return sanitized_history, []
+
+    removal_index_set = set(removal_indices)
+    removed_messages = [sanitized_history[index] for index in removal_indices]
+    sanitized_history = [
+        message for index, message in enumerate(sanitized_history) if index not in removal_index_set
+    ]
+    return sanitized_history, removed_messages
+
+
 def _post_pz_declared_available_tools(rendered_prompt_surface: str) -> list[str]:
     """Infer which tools are still explicitly exposed on the post-PZ prompt surface."""
 
@@ -835,39 +901,14 @@ def _sanitize_post_pz_transition_history(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Remove only superseded first-turn assistant branch messages from the active post-PZ history."""
 
-    sanitized_history = _clone_history(history)
-    removed_messages: list[dict[str, Any]] = []
-    sanitation_applied = False
-    sanitation_reason = "not_needed"
-
-    gate_message_index: int | None = None
-    for index, message in enumerate(sanitized_history):
-        if (
-            message["role"] == "user"
-            and message.get("metadata", {}).get("runtime_intervention") == "first_turn_protocol_gate"
-        ):
-            gate_message_index = index
-
-    if gate_message_index is not None:
-        prior_user_index = None
-        for index in range(gate_message_index - 1, -1, -1):
-            if sanitized_history[index]["role"] == "user":
-                prior_user_index = index
-                break
-        removal_indices = [
-            index
-            for index in range((prior_user_index or -1) + 1, gate_message_index)
-            if sanitized_history[index]["role"] == "assistant"
-        ]
-        if removal_indices:
-            removed_messages = [sanitized_history[index] for index in removal_indices]
-            sanitized_history = [
-                message
-                for index, message in enumerate(sanitized_history)
-                if index not in set(removal_indices)
-            ]
-            sanitation_applied = True
-            sanitation_reason = "removed_superseded_first_turn_gate_assistant_branch"
+    sanitized_history, removed_messages = _remove_assistant_messages_before_runtime_intervention(
+        history,
+        runtime_intervention="first_turn_protocol_gate",
+    )
+    sanitation_applied = bool(removed_messages)
+    sanitation_reason = (
+        "removed_superseded_first_turn_gate_assistant_branch" if sanitation_applied else "not_needed"
+    )
 
     removed_obsolete_terminal_answer_count = sum(
         1 for message in removed_messages if message["message_type"] == "final_answer"
@@ -886,6 +927,16 @@ def _sanitize_post_pz_transition_history(
         ],
         "removed_message_digests": [_message_digest(message) for message in removed_messages],
     }
+
+
+def _sanitize_post_pz_second_turn_gate_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove the superseded direct-final branch once the second-turn gate recovers to CR."""
+
+    sanitized_history, _removed_messages = _remove_assistant_messages_before_runtime_intervention(
+        history,
+        runtime_intervention="post_pz_second_turn_protocol_gate",
+    )
+    return sanitized_history
 
 
 def _post_pz_transition_payload(
@@ -976,6 +1027,16 @@ def _first_turn_protocol_gate_retry_instruction() -> str:
     )
 
 
+def _post_pz_second_turn_gate_retry_instruction() -> str:
+    """Return the deterministic runtime reminder used by the bounded post-PZ CR gate."""
+
+    return (
+        "Runtime protocol reminder: this is a pz_cr run and PZ has already been used. "
+        "Before giving a final answer, compare against a same-category normal reference. "
+        "Call CR now and reply with exactly one valid <tool_call> and no <answer>."
+    )
+
+
 def _should_trigger_first_turn_gate(
     *,
     gate_mode: str,
@@ -996,6 +1057,30 @@ def _should_trigger_first_turn_gate(
         and turn_index == 0
         and event == "final_answer"
         and not tool_traces
+    )
+
+
+def _should_trigger_post_pz_second_turn_gate(
+    *,
+    gate_mode: str,
+    tool_mode: str,
+    first_successful_tool_name: str | None,
+    post_pz_transition_audited: bool,
+    post_pz_assistant_turn_index: int | None,
+    current_turn_index: int,
+    post_sanitation_contract_valid_for_cr: bool | None,
+    event: str,
+) -> bool:
+    """Return whether the bounded post-PZ second-turn CR gate should fire."""
+
+    return (
+        gate_mode == "retry_once_require_cr_after_pz"
+        and tool_mode == "pz_cr"
+        and first_successful_tool_name == "PZ"
+        and post_pz_transition_audited
+        and post_pz_assistant_turn_index == current_turn_index
+        and post_sanitation_contract_valid_for_cr is True
+        and event == "final_answer"
     )
 
 
@@ -1322,6 +1407,7 @@ def run_baseline(
                 raw_output_sha256=sha256_file(raw_output_path),
                 trace_path=str(trace_path.resolve()),
                 first_turn_protocol_gate_mode="off",
+                post_pz_second_turn_gate_mode="off",
                 first_turn_gate_triggered=False,
                 first_turn_gate_retry_count=0,
                 first_turn_gate_recovered=False,
@@ -1355,6 +1441,15 @@ def run_baseline(
                 post_pz_second_turn_parser_valid=None,
                 post_pz_second_turn_schema_valid=None,
                 post_pz_second_turn_failure_reason=None,
+                post_pz_second_turn_gate_triggered=False,
+                post_pz_second_turn_gate_outcome="gate_not_triggered",
+                post_pz_second_turn_gate_retry_attempted=False,
+                post_pz_second_turn_gate_retry_called_tool_name=None,
+                post_pz_second_turn_gate_retry_parser_valid=None,
+                post_pz_second_turn_gate_retry_schema_valid=None,
+                post_pz_second_turn_gate_retry_failure_reason=None,
+                post_pz_second_turn_gate_retry_raw_output_path=None,
+                post_pz_second_turn_gate_sidecar_path=None,
                 metadata={
                     "backend_metadata": response.metadata,
                     "sample_source_kind": sample["metadata"].get("dataset_kind"),
@@ -1520,6 +1615,7 @@ def _tool_loop_sample(
     terminal_answer_present = False
     terminal_answer_turn_index: int | None = None
     first_turn_protocol_gate_mode = runtime_config["first_turn_protocol_gate_mode"]
+    post_pz_second_turn_gate_mode = runtime_config["post_pz_second_turn_gate_mode"]
     first_turn_gate_triggered = False
     first_turn_gate_retry_count = 0
     first_turn_gate_recovered = False
@@ -1555,6 +1651,15 @@ def _tool_loop_sample(
     post_pz_second_turn_parser_valid: bool | None = None
     post_pz_second_turn_schema_valid: bool | None = None
     post_pz_second_turn_failure_reason: str | None = None
+    post_pz_second_turn_gate_triggered = False
+    post_pz_second_turn_gate_outcome = "gate_not_triggered"
+    post_pz_second_turn_gate_retry_attempted = False
+    post_pz_second_turn_gate_retry_called_tool_name: str | None = None
+    post_pz_second_turn_gate_retry_parser_valid: bool | None = None
+    post_pz_second_turn_gate_retry_schema_valid: bool | None = None
+    post_pz_second_turn_gate_retry_failure_reason: str | None = None
+    post_pz_second_turn_gate_retry_raw_output_path: Path | None = None
+    post_pz_second_turn_gate_sidecar_path: Path | None = None
     prompt_audit_path = _prompt_audit_sidecar_path(directories["raw_outputs"], seed=seed, sample_slug=sample_slug)
     prompt_audit = _prompt_audit_payload(
         prompt_bundle,
@@ -1775,6 +1880,60 @@ def _tool_loop_sample(
         post_pz_transition_sidecar["second_turn_schema_valid"] = second_turn_schema_valid_value
         post_pz_transition_sidecar["second_turn_failure_reason"] = second_turn_failure_reason_value
         write_json(post_pz_transition_sidecar_path, post_pz_transition_sidecar)
+
+    def _write_post_pz_second_turn_gate_sidecar(
+        *,
+        turn_index: int,
+        first_attempt_raw_output_path: Path,
+        retry_instruction_text: str,
+        retry_raw_output_path: Path | None,
+        final_gate_outcome: str,
+        retry_called_tool_name: str | None,
+        retry_parser_valid_value: bool | None,
+        retry_schema_valid_value: bool | None,
+        retry_failure_reason_value: str | None,
+    ) -> None:
+        """Write one bounded post-PZ second-turn gate sidecar when the retry path is used."""
+
+        nonlocal post_pz_second_turn_gate_sidecar_path
+        post_pz_second_turn_gate_sidecar_path = _post_pz_second_turn_gate_sidecar_path(
+            directories["raw_outputs"],
+            seed=seed,
+            sample_slug=sample_slug,
+            turn_index=turn_index,
+        )
+        write_json(
+            post_pz_second_turn_gate_sidecar_path,
+            {
+                "sample_id": sample["sample_id"],
+                "tool_mode": definition["mode"],
+                "gate_mode": post_pz_second_turn_gate_mode,
+                "gate_triggered": True,
+                "trigger_reason": "direct_final_answer_after_valid_clean_post_pz_cr_contract",
+                "first_tool_name": first_successful_tool_name,
+                "first_tool_turn_index": first_successful_tool_turn_index,
+                "post_pz_assistant_turn_index": turn_index,
+                "post_sanitation_transition_contract_valid_for_cr": (
+                    post_pz_transition_post_sanitation_contract_valid_for_cr
+                ),
+                "first_attempt_raw_output_path": str(first_attempt_raw_output_path.resolve()),
+                "retry_instruction_text": retry_instruction_text,
+                "retry_raw_output_path": (
+                    str(retry_raw_output_path.resolve()) if retry_raw_output_path is not None else None
+                ),
+                "final_gate_outcome": final_gate_outcome,
+                "retry_called_tool_name": retry_called_tool_name,
+                "retry_parser_valid": retry_parser_valid_value,
+                "retry_schema_valid": retry_schema_valid_value,
+                "retry_failure_reason": retry_failure_reason_value,
+                "prompt_audit_path": str(prompt_audit_path.resolve()),
+                "post_pz_transition_sidecar_path": (
+                    str(post_pz_transition_sidecar_path.resolve())
+                    if post_pz_transition_sidecar_path is not None
+                    else None
+                ),
+            },
+        )
 
     for turn_index in range(definition["max_tool_turns"] + 1):
         if prompt_audit["mode_contract_mismatch"]:
@@ -2088,6 +2247,264 @@ def _tool_loop_sample(
             continue
 
         if event == "final_answer":
+            if _should_trigger_post_pz_second_turn_gate(
+                gate_mode=post_pz_second_turn_gate_mode,
+                tool_mode=definition["mode"],
+                first_successful_tool_name=first_successful_tool_name,
+                post_pz_transition_audited=post_pz_transition_audited,
+                post_pz_assistant_turn_index=(
+                    post_pz_transition_sidecar["post_pz_assistant_turn_index"]
+                    if post_pz_transition_sidecar is not None
+                    else None
+                ),
+                current_turn_index=turn_index,
+                post_sanitation_contract_valid_for_cr=(
+                    post_pz_transition_post_sanitation_contract_valid_for_cr
+                ),
+                event=event,
+            ):
+                post_pz_second_turn_gate_triggered = True
+                post_pz_second_turn_gate_retry_attempted = True
+                _finalize_post_pz_transition_audit(
+                    turn_index=turn_index,
+                    raw_output_path=raw_output_path,
+                    event=event,
+                    second_turn_called_cr=False,
+                    second_turn_called_non_cr_tool=False,
+                    second_turn_parser_valid_value=None,
+                    second_turn_schema_valid_value=None,
+                    second_turn_failure_reason_value=None,
+                )
+                retry_instruction_text = _post_pz_second_turn_gate_retry_instruction()
+                _append_final_answer_message(
+                    history,
+                    response.raw_output,
+                    backend_name=response.backend_name,
+                    raw_output_path=str(raw_output_path.resolve()),
+                )
+                _append_runtime_gate_reminder(
+                    history,
+                    retry_instruction_text,
+                    gate_mode=post_pz_second_turn_gate_mode,
+                    runtime_intervention="post_pz_second_turn_protocol_gate",
+                    gate_mode_metadata_key="post_pz_second_turn_gate_mode",
+                )
+                retry_request = BackendRequest(
+                    sample_id=sample["sample_id"],
+                    seed=seed,
+                    prompt_version=prompt_bundle.prompt_version,
+                    messages=history,
+                    stop_sequences=prompt_bundle.stop_sequences,
+                    tool_mode=definition["mode"],
+                    metadata={
+                        "tool_mode": definition["mode"],
+                        "turn_index": turn_index,
+                        "retry_count": 1,
+                        "runtime_intervention": "post_pz_second_turn_protocol_gate",
+                        "sample_kind": sample["metadata"].get("dataset_kind", "unknown"),
+                    },
+                )
+                retry_response = backend.generate(retry_request, sample=sample)
+                retry_raw_output_path = _retry_raw_output_path(
+                    directories["raw_outputs"],
+                    seed=seed,
+                    sample_slug=sample_slug,
+                    turn_index=turn_index,
+                    retry_count=1,
+                )
+                post_pz_second_turn_gate_retry_raw_output_path = retry_raw_output_path
+                retry_decision, retry_event, retry_normalization_metadata = _record_response_and_normalize(
+                    retry_response,
+                    turn_index=turn_index,
+                    raw_output_path=retry_raw_output_path,
+                )
+
+                if retry_event == "tool_call":
+                    try:
+                        retry_parsed_call = retry_decision.parsed_call or parse_tool_call(
+                            retry_response.raw_output,
+                            tool_path=definition["mode"],
+                        )
+                    except Exception as exc:  # noqa: BLE001 - bounded strict-retry failure path.
+                        error_message = str(exc)
+                        failure_reason = _failure_reason("runtime_exception", str(exc))
+                        post_pz_second_turn_gate_outcome = "retry_parse_failure"
+                        post_pz_second_turn_gate_retry_parser_valid = False
+                        post_pz_second_turn_gate_retry_schema_valid = False
+                        post_pz_second_turn_gate_retry_failure_reason = failure_reason
+                        _write_post_pz_second_turn_gate_sidecar(
+                            turn_index=turn_index,
+                            first_attempt_raw_output_path=raw_output_path,
+                            retry_instruction_text=retry_instruction_text,
+                            retry_raw_output_path=retry_raw_output_path,
+                            final_gate_outcome=post_pz_second_turn_gate_outcome,
+                            retry_called_tool_name=None,
+                            retry_parser_valid_value=False,
+                            retry_schema_valid_value=False,
+                            retry_failure_reason_value=failure_reason,
+                        )
+                        _append_tool_request(
+                            history,
+                            retry_response.raw_output,
+                            backend_name=retry_response.backend_name,
+                            raw_output_path=str(retry_raw_output_path.resolve()),
+                            tool_name=None,
+                            call_id=None,
+                            error_message=error_message,
+                            extra_metadata=retry_normalization_metadata,
+                        )
+                        break
+
+                    post_pz_second_turn_gate_retry_called_tool_name = retry_parsed_call.tool_name
+                    post_pz_second_turn_gate_retry_parser_valid = True
+                    post_pz_second_turn_gate_retry_schema_valid = None
+                    if retry_parsed_call.tool_name != "CR":
+                        error_message = (
+                            "Post-PZ second-turn gate retry called a non-CR tool after the CR reminder"
+                        )
+                        failure_reason = "runtime_exception:post_pz_second_turn_gate_called_non_cr_tool_after_retry"
+                        post_pz_second_turn_gate_outcome = "called_non_cr_tool_after_retry"
+                        post_pz_second_turn_gate_retry_failure_reason = failure_reason
+                        _write_post_pz_second_turn_gate_sidecar(
+                            turn_index=turn_index,
+                            first_attempt_raw_output_path=raw_output_path,
+                            retry_instruction_text=retry_instruction_text,
+                            retry_raw_output_path=retry_raw_output_path,
+                            final_gate_outcome=post_pz_second_turn_gate_outcome,
+                            retry_called_tool_name=retry_parsed_call.tool_name,
+                            retry_parser_valid_value=True,
+                            retry_schema_valid_value=None,
+                            retry_failure_reason_value=failure_reason,
+                        )
+                        _append_tool_request(
+                            history,
+                            retry_response.raw_output,
+                            backend_name=retry_response.backend_name,
+                            raw_output_path=str(retry_raw_output_path.resolve()),
+                            tool_name=retry_parsed_call.tool_name,
+                            call_id=retry_parsed_call.call_id,
+                            error_message=error_message,
+                            extra_metadata=retry_normalization_metadata,
+                        )
+                        break
+
+                    history = _sanitize_post_pz_second_turn_gate_history(history)
+                    _append_tool_request(
+                        history,
+                        retry_response.raw_output,
+                        backend_name=retry_response.backend_name,
+                        raw_output_path=str(retry_raw_output_path.resolve()),
+                        tool_name=retry_parsed_call.tool_name,
+                        call_id=retry_parsed_call.call_id,
+                        extra_metadata=retry_normalization_metadata,
+                    )
+                    try:
+                        retry_tool_result = execute_tool_call(
+                            retry_parsed_call,
+                            sample=sample,
+                            sample_pool=sample_pool,
+                            artifact_dir=directories["raw_outputs"] / f"seed_{seed}" / sample_slug / "tool_artifacts",
+                        )
+                    except Exception as exc:  # noqa: BLE001 - explicit gate-execution failure path.
+                        error_message = str(exc)
+                        failure_reason = _failure_reason("runtime_exception", str(exc))
+                        post_pz_second_turn_gate_outcome = (
+                            "called_cr_but_later_failed_execution_or_contract"
+                        )
+                        post_pz_second_turn_gate_retry_failure_reason = failure_reason
+                        _write_post_pz_second_turn_gate_sidecar(
+                            turn_index=turn_index,
+                            first_attempt_raw_output_path=raw_output_path,
+                            retry_instruction_text=retry_instruction_text,
+                            retry_raw_output_path=retry_raw_output_path,
+                            final_gate_outcome=post_pz_second_turn_gate_outcome,
+                            retry_called_tool_name="CR",
+                            retry_parser_valid_value=True,
+                            retry_schema_valid_value=None,
+                            retry_failure_reason_value=failure_reason,
+                        )
+                        break
+
+                    post_pz_second_turn_gate_outcome = "recovered_to_cr_call"
+                    _write_post_pz_second_turn_gate_sidecar(
+                        turn_index=turn_index,
+                        first_attempt_raw_output_path=raw_output_path,
+                        retry_instruction_text=retry_instruction_text,
+                        retry_raw_output_path=retry_raw_output_path,
+                        final_gate_outcome=post_pz_second_turn_gate_outcome,
+                        retry_called_tool_name="CR",
+                        retry_parser_valid_value=True,
+                        retry_schema_valid_value=None,
+                        retry_failure_reason_value=None,
+                    )
+                    retry_tool_payload = retry_tool_result.to_payload()
+                    tool_traces.append(retry_tool_payload)
+                    history = reinsert_tool_result(history, retry_tool_result)
+                    continue
+
+                if retry_event == "final_answer":
+                    terminal_answer_present = True
+                    terminal_answer_turn_index = turn_index
+                    try:
+                        prediction = parse_final_answer(retry_response.raw_output)
+                        parser_valid = True
+                        schema_valid = True
+                        post_pz_second_turn_gate_outcome = "still_terminal_after_retry"
+                        post_pz_second_turn_gate_retry_parser_valid = True
+                        post_pz_second_turn_gate_retry_schema_valid = True
+                    except Exception as exc:  # noqa: BLE001 - bounded strict-retry failure path.
+                        error_message = str(exc)
+                        failure_reason = _failure_reason("parser_invalid", str(exc))
+                        post_pz_second_turn_gate_outcome = "retry_parse_failure"
+                        post_pz_second_turn_gate_retry_parser_valid = False
+                        post_pz_second_turn_gate_retry_schema_valid = False
+                        post_pz_second_turn_gate_retry_failure_reason = failure_reason
+                    _write_post_pz_second_turn_gate_sidecar(
+                        turn_index=turn_index,
+                        first_attempt_raw_output_path=raw_output_path,
+                        retry_instruction_text=retry_instruction_text,
+                        retry_raw_output_path=retry_raw_output_path,
+                        final_gate_outcome=post_pz_second_turn_gate_outcome,
+                        retry_called_tool_name=None,
+                        retry_parser_valid_value=post_pz_second_turn_gate_retry_parser_valid,
+                        retry_schema_valid_value=post_pz_second_turn_gate_retry_schema_valid,
+                        retry_failure_reason_value=post_pz_second_turn_gate_retry_failure_reason,
+                    )
+                    _append_final_answer_message(
+                        history,
+                        retry_response.raw_output,
+                        backend_name=retry_response.backend_name,
+                        raw_output_path=str(retry_raw_output_path.resolve()),
+                        error_message=error_message,
+                    )
+                    break
+
+                error_message = "Post-PZ second-turn gate retry did not contain a valid CR tool call or final answer block"
+                failure_reason = "runtime_exception:post_pz_second_turn_gate_retry_missing_contract_block"
+                post_pz_second_turn_gate_outcome = "retry_parse_failure"
+                post_pz_second_turn_gate_retry_parser_valid = False
+                post_pz_second_turn_gate_retry_schema_valid = False
+                post_pz_second_turn_gate_retry_failure_reason = failure_reason
+                _write_post_pz_second_turn_gate_sidecar(
+                    turn_index=turn_index,
+                    first_attempt_raw_output_path=raw_output_path,
+                    retry_instruction_text=retry_instruction_text,
+                    retry_raw_output_path=retry_raw_output_path,
+                    final_gate_outcome=post_pz_second_turn_gate_outcome,
+                    retry_called_tool_name=None,
+                    retry_parser_valid_value=False,
+                    retry_schema_valid_value=False,
+                    retry_failure_reason_value=failure_reason,
+                )
+                _append_final_answer_message(
+                    history,
+                    retry_response.raw_output,
+                    backend_name=retry_response.backend_name,
+                    raw_output_path=str(retry_raw_output_path.resolve()),
+                    error_message=error_message,
+                )
+                break
+
             terminal_answer_present = True
             terminal_answer_turn_index = turn_index
             try:
@@ -2224,6 +2641,26 @@ def _tool_loop_sample(
             "post_pz_second_turn_parser_valid": post_pz_second_turn_parser_valid,
             "post_pz_second_turn_schema_valid": post_pz_second_turn_schema_valid,
             "post_pz_second_turn_failure_reason": post_pz_second_turn_failure_reason,
+            "post_pz_second_turn_gate_mode": post_pz_second_turn_gate_mode,
+            "post_pz_second_turn_gate_triggered": post_pz_second_turn_gate_triggered,
+            "post_pz_second_turn_gate_outcome": post_pz_second_turn_gate_outcome,
+            "post_pz_second_turn_gate_retry_attempted": post_pz_second_turn_gate_retry_attempted,
+            "post_pz_second_turn_gate_retry_called_tool_name": (
+                post_pz_second_turn_gate_retry_called_tool_name
+            ),
+            "post_pz_second_turn_gate_retry_parser_valid": post_pz_second_turn_gate_retry_parser_valid,
+            "post_pz_second_turn_gate_retry_schema_valid": post_pz_second_turn_gate_retry_schema_valid,
+            "post_pz_second_turn_gate_retry_failure_reason": post_pz_second_turn_gate_retry_failure_reason,
+            "post_pz_second_turn_gate_retry_raw_output_path": (
+                str(post_pz_second_turn_gate_retry_raw_output_path.resolve())
+                if post_pz_second_turn_gate_retry_raw_output_path is not None
+                else None
+            ),
+            "post_pz_second_turn_gate_sidecar_path": (
+                str(post_pz_second_turn_gate_sidecar_path.resolve())
+                if post_pz_second_turn_gate_sidecar_path is not None
+                else None
+            ),
             "post_pz_transition": post_pz_transition_sidecar,
         },
     )
@@ -2250,6 +2687,7 @@ def _tool_loop_sample(
         raw_output_sha256=sha256_file(last_raw_output_path),
         trace_path=str(trace_path.resolve()),
         first_turn_protocol_gate_mode=first_turn_protocol_gate_mode,
+        post_pz_second_turn_gate_mode=post_pz_second_turn_gate_mode,
         first_turn_gate_triggered=first_turn_gate_triggered,
         first_turn_gate_retry_count=first_turn_gate_retry_count,
         first_turn_gate_recovered=first_turn_gate_recovered,
@@ -2299,6 +2737,23 @@ def _tool_loop_sample(
         post_pz_second_turn_parser_valid=post_pz_second_turn_parser_valid,
         post_pz_second_turn_schema_valid=post_pz_second_turn_schema_valid,
         post_pz_second_turn_failure_reason=post_pz_second_turn_failure_reason,
+        post_pz_second_turn_gate_triggered=post_pz_second_turn_gate_triggered,
+        post_pz_second_turn_gate_outcome=post_pz_second_turn_gate_outcome,
+        post_pz_second_turn_gate_retry_attempted=post_pz_second_turn_gate_retry_attempted,
+        post_pz_second_turn_gate_retry_called_tool_name=post_pz_second_turn_gate_retry_called_tool_name,
+        post_pz_second_turn_gate_retry_parser_valid=post_pz_second_turn_gate_retry_parser_valid,
+        post_pz_second_turn_gate_retry_schema_valid=post_pz_second_turn_gate_retry_schema_valid,
+        post_pz_second_turn_gate_retry_failure_reason=post_pz_second_turn_gate_retry_failure_reason,
+        post_pz_second_turn_gate_retry_raw_output_path=(
+            str(post_pz_second_turn_gate_retry_raw_output_path.resolve())
+            if post_pz_second_turn_gate_retry_raw_output_path is not None
+            else None
+        ),
+        post_pz_second_turn_gate_sidecar_path=(
+            str(post_pz_second_turn_gate_sidecar_path.resolve())
+            if post_pz_second_turn_gate_sidecar_path is not None
+            else None
+        ),
         metadata={
             "sample_source_kind": sample["metadata"].get("dataset_kind"),
             "tool_trace_count": len(tool_traces),
@@ -2366,6 +2821,26 @@ def _tool_loop_sample(
             "post_pz_second_turn_parser_valid": post_pz_second_turn_parser_valid,
             "post_pz_second_turn_schema_valid": post_pz_second_turn_schema_valid,
             "post_pz_second_turn_failure_reason": post_pz_second_turn_failure_reason,
+            "post_pz_second_turn_gate_mode": post_pz_second_turn_gate_mode,
+            "post_pz_second_turn_gate_triggered": post_pz_second_turn_gate_triggered,
+            "post_pz_second_turn_gate_outcome": post_pz_second_turn_gate_outcome,
+            "post_pz_second_turn_gate_retry_attempted": post_pz_second_turn_gate_retry_attempted,
+            "post_pz_second_turn_gate_retry_called_tool_name": (
+                post_pz_second_turn_gate_retry_called_tool_name
+            ),
+            "post_pz_second_turn_gate_retry_parser_valid": post_pz_second_turn_gate_retry_parser_valid,
+            "post_pz_second_turn_gate_retry_schema_valid": post_pz_second_turn_gate_retry_schema_valid,
+            "post_pz_second_turn_gate_retry_failure_reason": post_pz_second_turn_gate_retry_failure_reason,
+            "post_pz_second_turn_gate_retry_raw_output_path": (
+                str(post_pz_second_turn_gate_retry_raw_output_path.resolve())
+                if post_pz_second_turn_gate_retry_raw_output_path is not None
+                else None
+            ),
+            "post_pz_second_turn_gate_sidecar_path": (
+                str(post_pz_second_turn_gate_sidecar_path.resolve())
+                if post_pz_second_turn_gate_sidecar_path is not None
+                else None
+            ),
             "post_pz_transition": post_pz_transition_sidecar,
             "runtime_provenance": _resolved_runtime_provenance(
                 definition,
@@ -2435,6 +2910,7 @@ def run_tool_augmented(
     post_pz_transition_sanitation_summary = summarize_post_pz_transition_sanitation(
         prediction_records
     )
+    post_pz_second_turn_gate_summary = summarize_post_pz_second_turn_gate(prediction_records)
     first_turn_gate_summary = _first_turn_gate_summary(prediction_records)
     first_turn_gate_repair_summary = _first_turn_gate_repair_summary(prediction_records)
     first_turn_gate_repair_failure_families = _first_turn_gate_repair_failure_family_artifact(
@@ -2449,6 +2925,10 @@ def run_tool_augmented(
         metrics_dir=directories["metrics"],
     )
     post_pz_transition_sanitation_sidecars = write_post_pz_transition_sanitation_sidecars(
+        prediction_records=prediction_records,
+        metrics_dir=directories["metrics"],
+    )
+    post_pz_second_turn_gate_summary_path = write_post_pz_second_turn_gate_summary(
         prediction_records=prediction_records,
         metrics_dir=directories["metrics"],
     )
@@ -2470,10 +2950,12 @@ def run_tool_augmented(
         runtime_provenance=runtime_provenance,
         tool_first_intervention_strategy=runtime_provenance["tool_first_intervention_strategy"],
         first_turn_protocol_gate_mode=runtime_provenance["first_turn_protocol_gate_mode"],
+        post_pz_second_turn_gate_mode=runtime_provenance["post_pz_second_turn_gate_mode"],
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
         post_pz_transition_summary=post_pz_transition_summary,
         post_pz_transition_sanitation_summary=post_pz_transition_sanitation_summary,
+        post_pz_second_turn_gate_summary=post_pz_second_turn_gate_summary,
         first_turn_gate_summary=first_turn_gate_summary,
         first_turn_gate_repair_summary=first_turn_gate_repair_summary,
     )
@@ -2567,6 +3049,7 @@ def run_tool_augmented(
             "per_category_post_pz_transition_sanitation": post_pz_transition_sanitation_sidecars[
                 "per_category_post_pz_transition_sanitation"
             ],
+            "post_pz_second_turn_gate_summary": post_pz_second_turn_gate_summary_path,
             "first_turn_gate_repair_failure_families": str(
                 first_turn_gate_repair_failure_families_path.resolve()
             ),
@@ -2575,11 +3058,13 @@ def run_tool_augmented(
         notes=definition.get("notes", []),
         tool_first_intervention_strategy=runtime_provenance["tool_first_intervention_strategy"],
         first_turn_protocol_gate_mode=runtime_provenance["first_turn_protocol_gate_mode"],
+        post_pz_second_turn_gate_mode=runtime_provenance["post_pz_second_turn_gate_mode"],
         normalization_summary=normalization_summary,
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
         post_pz_transition_summary=post_pz_transition_summary,
         post_pz_transition_sanitation_summary=post_pz_transition_sanitation_summary,
+        post_pz_second_turn_gate_summary=post_pz_second_turn_gate_summary,
         first_turn_gate_summary=first_turn_gate_summary,
         first_turn_gate_repair_summary=first_turn_gate_repair_summary,
     )
@@ -2601,12 +3086,14 @@ def run_tool_augmented(
         "execution_boundary": definition["execution_boundary"],
         "tool_first_intervention_strategy": runtime_provenance["tool_first_intervention_strategy"],
         "first_turn_protocol_gate_mode": runtime_provenance["first_turn_protocol_gate_mode"],
+        "post_pz_second_turn_gate_mode": runtime_provenance["post_pz_second_turn_gate_mode"],
         "run_provenance": runtime_provenance,
         "normalization_summary": normalization_summary,
         "prompt_audit_summary": prompt_audit_summary,
         "zero_tool_behavior_summary": zero_tool_behavior_summary,
         "post_pz_transition_summary": post_pz_transition_summary,
         "post_pz_transition_sanitation_summary": post_pz_transition_sanitation_summary,
+        "post_pz_second_turn_gate_summary": post_pz_second_turn_gate_summary,
         "first_turn_gate_summary": first_turn_gate_summary,
         "first_turn_gate_repair_summary": first_turn_gate_repair_summary,
         "notes": [
@@ -2734,6 +3221,11 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=FIRST_TURN_PROTOCOL_GATE_MODES,
         help="Optional first-turn protocol gate override. Defaults to off.",
     )
+    parser.add_argument(
+        "--post-pz-second-turn-gate-mode",
+        choices=POST_PZ_SECOND_TURN_GATE_MODES,
+        help="Optional bounded post-PZ second-turn CR gate override. Defaults to off.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate config/runtime surfaces without inference.")
     return parser
 
@@ -2753,6 +3245,7 @@ def main() -> int:
         "trust_remote_code": args.trust_remote_code,
         "tool_first_intervention_strategy": args.tool_first_intervention_strategy,
         "first_turn_protocol_gate_mode": args.first_turn_protocol_gate_mode,
+        "post_pz_second_turn_gate_mode": args.post_pz_second_turn_gate_mode,
         "generation": {
             key: value
             for key, value in {

@@ -26,6 +26,7 @@
     "raw_output_sha256",
     "trace_path",
     "first_turn_protocol_gate_mode",
+    "post_pz_second_turn_gate_mode",
     "first_turn_gate_triggered",
     "first_turn_gate_retry_count",
     "first_turn_gate_recovered",
@@ -59,6 +60,15 @@
     "post_pz_second_turn_parser_valid",
     "post_pz_second_turn_schema_valid",
     "post_pz_second_turn_failure_reason",
+    "post_pz_second_turn_gate_triggered",
+    "post_pz_second_turn_gate_outcome",
+    "post_pz_second_turn_gate_retry_attempted",
+    "post_pz_second_turn_gate_retry_called_tool_name",
+    "post_pz_second_turn_gate_retry_parser_valid",
+    "post_pz_second_turn_gate_retry_schema_valid",
+    "post_pz_second_turn_gate_retry_failure_reason",
+    "post_pz_second_turn_gate_retry_raw_output_path",
+    "post_pz_second_turn_gate_sidecar_path",
     "first_protocol_event_type",
     "first_assistant_output_terminal",
     "tool_call_count",
@@ -111,6 +121,10 @@
     "first_turn_protocol_gate_mode": {
       "type": "string",
       "enum": ["off", "retry_once_pz_cr"]
+    },
+    "post_pz_second_turn_gate_mode": {
+      "type": "string",
+      "enum": ["off", "retry_once_require_cr_after_pz"]
     },
     "first_turn_gate_triggered": { "type": "boolean" },
     "first_turn_gate_retry_count": { "type": "integer", "minimum": 0, "maximum": 1 },
@@ -238,6 +252,38 @@
       "type": ["boolean", "null"]
     },
     "post_pz_second_turn_failure_reason": {
+      "type": ["string", "null"]
+    },
+    "post_pz_second_turn_gate_triggered": { "type": "boolean" },
+    "post_pz_second_turn_gate_outcome": {
+      "type": "string",
+      "enum": [
+        "gate_not_triggered",
+        "recovered_to_cr_call",
+        "retry_parse_failure",
+        "still_terminal_after_retry",
+        "called_non_cr_tool_after_retry",
+        "called_cr_but_later_failed_execution_or_contract"
+      ]
+    },
+    "post_pz_second_turn_gate_retry_attempted": { "type": "boolean" },
+    "post_pz_second_turn_gate_retry_called_tool_name": {
+      "type": ["string", "null"],
+      "enum": [null, "PZ", "CR"]
+    },
+    "post_pz_second_turn_gate_retry_parser_valid": {
+      "type": ["boolean", "null"]
+    },
+    "post_pz_second_turn_gate_retry_schema_valid": {
+      "type": ["boolean", "null"]
+    },
+    "post_pz_second_turn_gate_retry_failure_reason": {
+      "type": ["string", "null"]
+    },
+    "post_pz_second_turn_gate_retry_raw_output_path": {
+      "type": ["string", "null"]
+    },
+    "post_pz_second_turn_gate_sidecar_path": {
       "type": ["string", "null"]
     },
     "first_protocol_event_type": {
