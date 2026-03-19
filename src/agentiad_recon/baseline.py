@@ -28,8 +28,10 @@ from agentiad_recon.backends import (
 from agentiad_recon.behavior_audit import (
     build_zero_tool_behavior_fields,
     summarize_post_pz_transition,
+    summarize_post_pz_transition_sanitation,
     summarize_zero_tool_behavior,
     write_post_pz_transition_sidecars,
+    write_post_pz_transition_sanitation_sidecars,
     write_tool_first_strategy_summary,
     write_zero_tool_behavior_sidecars,
 )
@@ -656,6 +658,58 @@ def _render_history_prompt_surface(history: list[dict[str, Any]]) -> str:
     return "\n\n".join(rendered_messages)
 
 
+def _clone_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copy one mutable dialogue history without changing any message semantics."""
+
+    return [
+        {
+            "role": message["role"],
+            "message_type": message["message_type"],
+            "content": message["content"],
+            "image_refs": list(message.get("image_refs", [])),
+            "metadata": dict(message.get("metadata", {})),
+            "tool_name": message.get("tool_name"),
+            "call_id": message.get("call_id"),
+        }
+        for message in history
+    ]
+
+
+def _message_digest(message: dict[str, Any]) -> str:
+    """Build one stable digest for a removed or audited runtime message."""
+
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "role": message["role"],
+                "message_type": message["message_type"],
+                "content": message.get("content"),
+                "image_refs": message.get("image_refs", []),
+                "metadata": message.get("metadata", {}),
+                "tool_name": message.get("tool_name"),
+                "call_id": message.get("call_id"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _message_contains_pz_only_leakage(message: dict[str, Any]) -> bool:
+    """Detect the narrow stale pz_only-style leakage targeted by Prompt 2.11."""
+
+    content = str(message.get("content", "")).lower()
+    return any(
+        phrase in content
+        for phrase in (
+            "pz_only",
+            "available tools: pz only",
+            "do not request cr in this mode",
+            "no comparative retrieval is allowed in pz_only",
+        )
+    )
+
+
 def _post_pz_declared_available_tools(rendered_prompt_surface: str) -> list[str]:
     """Infer which tools are still explicitly exposed on the post-PZ prompt surface."""
 
@@ -683,19 +737,8 @@ def _post_pz_transition_protocol_event_type(event: str) -> str:
     return event if event in {"tool_call", "final_answer"} else "parse_failure"
 
 
-def _post_pz_transition_payload(
-    *,
-    history: list[dict[str, Any]],
-    sample_id: str,
-    tool_mode: str,
-    first_tool_name: str,
-    first_tool_turn_index: int,
-    first_turn_gate_outcome: str,
-    first_turn_retry_repair_involved: bool,
-    post_pz_assistant_turn_index: int,
-    prior_tool_trace_count: int,
-) -> dict[str, Any]:
-    """Build one auditable snapshot of the prompt surface shown after the first successful PZ call."""
+def _post_pz_transition_contract_fields(history: list[dict[str, Any]]) -> dict[str, Any]:
+    """Inspect one post-PZ rendered surface and classify its CR-transition validity."""
 
     rendered_prompt_surface = _render_history_prompt_surface(history)
     rendered_prompt_surface_digest = hashlib.sha256(
@@ -773,6 +816,97 @@ def _post_pz_transition_payload(
         transition_mismatch_reasons.append("post_pz_transition_missing_tool_context")
 
     return {
+        "rendered_prompt_surface": rendered_prompt_surface,
+        "rendered_prompt_surface_digest": rendered_prompt_surface_digest,
+        "declared_available_tools": declared_available_tools,
+        "cr_available_in_prompt_surface": cr_available_in_prompt_surface,
+        "query_image_instruction_present": query_image_instruction_present,
+        "crop_image_normalized_reference_present": crop_image_normalized_reference_present,
+        "pz_result_reinserted_present": pz_result_reinserted_present,
+        "pz_result_reinserted_digest": pz_result_reinserted_digest,
+        "transition_contract_valid_for_cr": not transition_mismatch_reasons,
+        "transition_mismatch_reasons": transition_mismatch_reasons,
+        "pz_only_leakage_present": prompt_contains_pz_only,
+    }
+
+
+def _sanitize_post_pz_transition_history(
+    history: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Remove only superseded first-turn assistant branch messages from the active post-PZ history."""
+
+    sanitized_history = _clone_history(history)
+    removed_messages: list[dict[str, Any]] = []
+    sanitation_applied = False
+    sanitation_reason = "not_needed"
+
+    gate_message_index: int | None = None
+    for index, message in enumerate(sanitized_history):
+        if (
+            message["role"] == "user"
+            and message.get("metadata", {}).get("runtime_intervention") == "first_turn_protocol_gate"
+        ):
+            gate_message_index = index
+
+    if gate_message_index is not None:
+        prior_user_index = None
+        for index in range(gate_message_index - 1, -1, -1):
+            if sanitized_history[index]["role"] == "user":
+                prior_user_index = index
+                break
+        removal_indices = [
+            index
+            for index in range((prior_user_index or -1) + 1, gate_message_index)
+            if sanitized_history[index]["role"] == "assistant"
+        ]
+        if removal_indices:
+            removed_messages = [sanitized_history[index] for index in removal_indices]
+            sanitized_history = [
+                message
+                for index, message in enumerate(sanitized_history)
+                if index not in set(removal_indices)
+            ]
+            sanitation_applied = True
+            sanitation_reason = "removed_superseded_first_turn_gate_assistant_branch"
+
+    removed_obsolete_terminal_answer_count = sum(
+        1 for message in removed_messages if message["message_type"] == "final_answer"
+    )
+    removed_pz_only_leakage_message_count = sum(
+        1 for message in removed_messages if _message_contains_pz_only_leakage(message)
+    )
+    return sanitized_history, {
+        "sanitation_applied": sanitation_applied,
+        "sanitation_reason": sanitation_reason,
+        "removed_message_count": len(removed_messages),
+        "removed_obsolete_terminal_answer_count": removed_obsolete_terminal_answer_count,
+        "removed_pz_only_leakage_message_count": removed_pz_only_leakage_message_count,
+        "removed_message_role_sequence": [
+            f"{message['role']}:{message['message_type']}" for message in removed_messages
+        ],
+        "removed_message_digests": [_message_digest(message) for message in removed_messages],
+    }
+
+
+def _post_pz_transition_payload(
+    *,
+    pre_sanitation_history: list[dict[str, Any]],
+    post_sanitation_history: list[dict[str, Any]],
+    sample_id: str,
+    tool_mode: str,
+    first_tool_name: str,
+    first_tool_turn_index: int,
+    first_turn_gate_outcome: str,
+    first_turn_retry_repair_involved: bool,
+    post_pz_assistant_turn_index: int,
+    prior_tool_trace_count: int,
+    sanitation_audit: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one auditable snapshot of the pre/post-sanitation post-PZ prompt surface."""
+
+    pre_sanitation_contract = _post_pz_transition_contract_fields(pre_sanitation_history)
+    post_sanitation_contract = _post_pz_transition_contract_fields(post_sanitation_history)
+    return {
         "sample_id": sample_id,
         "tool_mode": tool_mode,
         "first_tool_name": first_tool_name,
@@ -781,19 +915,49 @@ def _post_pz_transition_payload(
         "first_turn_retry_repair_involved": first_turn_retry_repair_involved,
         "post_pz_assistant_turn_index": post_pz_assistant_turn_index,
         "prior_tool_trace_count": prior_tool_trace_count,
-        "pz_result_reinserted_present": pz_result_reinserted_present,
-        "pz_result_reinserted_digest": pz_result_reinserted_digest,
-        "rendered_prompt_surface": rendered_prompt_surface,
-        "rendered_prompt_surface_digest": rendered_prompt_surface_digest,
-        "declared_available_tools": declared_available_tools,
-        "cr_available_in_prompt_surface": cr_available_in_prompt_surface,
-        "query_image_instruction_present": query_image_instruction_present,
-        "crop_image_normalized_reference_present": crop_image_normalized_reference_present,
-        "transition_contract_valid_for_cr": not transition_mismatch_reasons,
-        "transition_mismatch_reasons": transition_mismatch_reasons,
+        "pz_result_reinserted_present": pre_sanitation_contract["pz_result_reinserted_present"],
+        "pz_result_reinserted_digest": pre_sanitation_contract["pz_result_reinserted_digest"],
+        "rendered_prompt_surface": pre_sanitation_contract["rendered_prompt_surface"],
+        "rendered_prompt_surface_digest": pre_sanitation_contract["rendered_prompt_surface_digest"],
+        "declared_available_tools": pre_sanitation_contract["declared_available_tools"],
+        "cr_available_in_prompt_surface": pre_sanitation_contract["cr_available_in_prompt_surface"],
+        "query_image_instruction_present": pre_sanitation_contract["query_image_instruction_present"],
+        "crop_image_normalized_reference_present": pre_sanitation_contract[
+            "crop_image_normalized_reference_present"
+        ],
+        "transition_contract_valid_for_cr": pre_sanitation_contract["transition_contract_valid_for_cr"],
+        "transition_mismatch_reasons": pre_sanitation_contract["transition_mismatch_reasons"],
+        "sanitation_applied": sanitation_audit["sanitation_applied"],
+        "sanitation_reason": sanitation_audit["sanitation_reason"],
+        "removed_message_count": sanitation_audit["removed_message_count"],
+        "removed_obsolete_terminal_answer_count": sanitation_audit[
+            "removed_obsolete_terminal_answer_count"
+        ],
+        "removed_pz_only_leakage_message_count": sanitation_audit[
+            "removed_pz_only_leakage_message_count"
+        ],
+        "removed_message_role_sequence": sanitation_audit["removed_message_role_sequence"],
+        "removed_message_digests": sanitation_audit["removed_message_digests"],
+        "pre_sanitation_rendered_prompt_surface": pre_sanitation_contract["rendered_prompt_surface"],
+        "pre_sanitation_rendered_prompt_surface_digest": pre_sanitation_contract[
+            "rendered_prompt_surface_digest"
+        ],
+        "post_sanitation_rendered_prompt_surface": post_sanitation_contract["rendered_prompt_surface"],
+        "post_sanitation_rendered_prompt_surface_digest": post_sanitation_contract[
+            "rendered_prompt_surface_digest"
+        ],
+        "pre_sanitation_pz_only_leakage_present": pre_sanitation_contract["pz_only_leakage_present"],
+        "post_sanitation_pz_only_leakage_present": post_sanitation_contract["pz_only_leakage_present"],
+        "post_sanitation_transition_contract_valid_for_cr": post_sanitation_contract[
+            "transition_contract_valid_for_cr"
+        ],
+        "post_sanitation_transition_mismatch_reasons": post_sanitation_contract[
+            "transition_mismatch_reasons"
+        ],
         "second_turn_raw_output_path": None,
         "second_turn_protocol_event_type": None,
         "second_turn_terminal_without_cr": False,
+        "second_turn_direct_final_without_cr": False,
         "second_turn_called_cr": False,
         "second_turn_called_non_cr_tool": False,
         "second_turn_parser_valid": None,
@@ -1175,6 +1339,15 @@ def run_baseline(
                 post_pz_transition_sidecar_path=None,
                 post_pz_transition_contract_valid_for_cr=None,
                 post_pz_transition_mismatch_reasons=[],
+                post_pz_transition_sanitation_applied=False,
+                post_pz_transition_sanitation_reason="not_applicable",
+                post_pz_transition_removed_message_count=0,
+                post_pz_transition_removed_obsolete_terminal_answer_count=0,
+                post_pz_transition_removed_pz_only_leakage_message_count=0,
+                post_pz_transition_pre_sanitation_pz_only_leakage_present=False,
+                post_pz_transition_post_sanitation_pz_only_leakage_present=False,
+                post_pz_transition_post_sanitation_contract_valid_for_cr=None,
+                post_pz_transition_post_sanitation_mismatch_reasons=[],
                 post_pz_second_turn_protocol_event_type=None,
                 post_pz_second_turn_direct_final_without_cr=False,
                 post_pz_second_turn_called_cr=False,
@@ -1366,6 +1539,15 @@ def _tool_loop_sample(
     post_pz_transition_sidecar_path: Path | None = None
     post_pz_transition_contract_valid_for_cr: bool | None = None
     post_pz_transition_mismatch_reasons: list[str] = []
+    post_pz_transition_sanitation_applied = False
+    post_pz_transition_sanitation_reason = "not_applicable"
+    post_pz_transition_removed_message_count = 0
+    post_pz_transition_removed_obsolete_terminal_answer_count = 0
+    post_pz_transition_removed_pz_only_leakage_message_count = 0
+    post_pz_transition_pre_sanitation_pz_only_leakage_present = False
+    post_pz_transition_post_sanitation_pz_only_leakage_present = False
+    post_pz_transition_post_sanitation_contract_valid_for_cr: bool | None = None
+    post_pz_transition_post_sanitation_mismatch_reasons: list[str] = []
     post_pz_second_turn_protocol_event_type: str | None = None
     post_pz_second_turn_direct_final_without_cr = False
     post_pz_second_turn_called_cr = False
@@ -1466,13 +1648,23 @@ def _tool_loop_sample(
             first_successful_tool_turn_index = turn_index
 
     def _start_post_pz_transition_audit(*, turn_index: int) -> None:
-        """Snapshot the prompt surface shown on the first assistant turn after PZ reinsertion."""
+        """Sanitize and snapshot the first assistant turn shown after PZ reinsertion."""
 
+        nonlocal history
         nonlocal post_pz_transition_audited
         nonlocal post_pz_transition_sidecar
         nonlocal post_pz_transition_sidecar_path
         nonlocal post_pz_transition_contract_valid_for_cr
         nonlocal post_pz_transition_mismatch_reasons
+        nonlocal post_pz_transition_sanitation_applied
+        nonlocal post_pz_transition_sanitation_reason
+        nonlocal post_pz_transition_removed_message_count
+        nonlocal post_pz_transition_removed_obsolete_terminal_answer_count
+        nonlocal post_pz_transition_removed_pz_only_leakage_message_count
+        nonlocal post_pz_transition_pre_sanitation_pz_only_leakage_present
+        nonlocal post_pz_transition_post_sanitation_pz_only_leakage_present
+        nonlocal post_pz_transition_post_sanitation_contract_valid_for_cr
+        nonlocal post_pz_transition_post_sanitation_mismatch_reasons
         if (
             definition["mode"] != "pz_cr"
             or post_pz_transition_audited
@@ -1489,8 +1681,11 @@ def _tool_loop_sample(
             sample_slug=sample_slug,
             turn_index=turn_index,
         )
+        pre_sanitation_history = _clone_history(history)
+        sanitized_history, sanitation_audit = _sanitize_post_pz_transition_history(history)
         post_pz_transition_sidecar = _post_pz_transition_payload(
-            history=history,
+            pre_sanitation_history=pre_sanitation_history,
+            post_sanitation_history=sanitized_history,
             sample_id=sample["sample_id"],
             tool_mode=definition["mode"],
             first_tool_name=first_successful_tool_name,
@@ -1499,6 +1694,7 @@ def _tool_loop_sample(
             first_turn_retry_repair_involved=first_turn_gate_repair_succeeded,
             post_pz_assistant_turn_index=turn_index,
             prior_tool_trace_count=len(tool_traces),
+            sanitation_audit=sanitation_audit,
         )
         post_pz_transition_contract_valid_for_cr = post_pz_transition_sidecar[
             "transition_contract_valid_for_cr"
@@ -1506,6 +1702,28 @@ def _tool_loop_sample(
         post_pz_transition_mismatch_reasons = list(
             post_pz_transition_sidecar["transition_mismatch_reasons"]
         )
+        post_pz_transition_sanitation_applied = post_pz_transition_sidecar["sanitation_applied"]
+        post_pz_transition_sanitation_reason = post_pz_transition_sidecar["sanitation_reason"]
+        post_pz_transition_removed_message_count = post_pz_transition_sidecar["removed_message_count"]
+        post_pz_transition_removed_obsolete_terminal_answer_count = post_pz_transition_sidecar[
+            "removed_obsolete_terminal_answer_count"
+        ]
+        post_pz_transition_removed_pz_only_leakage_message_count = post_pz_transition_sidecar[
+            "removed_pz_only_leakage_message_count"
+        ]
+        post_pz_transition_pre_sanitation_pz_only_leakage_present = post_pz_transition_sidecar[
+            "pre_sanitation_pz_only_leakage_present"
+        ]
+        post_pz_transition_post_sanitation_pz_only_leakage_present = post_pz_transition_sidecar[
+            "post_sanitation_pz_only_leakage_present"
+        ]
+        post_pz_transition_post_sanitation_contract_valid_for_cr = post_pz_transition_sidecar[
+            "post_sanitation_transition_contract_valid_for_cr"
+        ]
+        post_pz_transition_post_sanitation_mismatch_reasons = list(
+            post_pz_transition_sidecar["post_sanitation_transition_mismatch_reasons"]
+        )
+        history = sanitized_history
 
     def _finalize_post_pz_transition_audit(
         *,
@@ -1546,6 +1764,9 @@ def _tool_loop_sample(
         post_pz_transition_sidecar["second_turn_raw_output_path"] = str(raw_output_path.resolve())
         post_pz_transition_sidecar["second_turn_protocol_event_type"] = protocol_event_type
         post_pz_transition_sidecar["second_turn_terminal_without_cr"] = (
+            post_pz_second_turn_direct_final_without_cr
+        )
+        post_pz_transition_sidecar["second_turn_direct_final_without_cr"] = (
             post_pz_second_turn_direct_final_without_cr
         )
         post_pz_transition_sidecar["second_turn_called_cr"] = second_turn_called_cr
@@ -1975,6 +2196,27 @@ def _tool_loop_sample(
             ),
             "post_pz_transition_contract_valid_for_cr": post_pz_transition_contract_valid_for_cr,
             "post_pz_transition_mismatch_reasons": post_pz_transition_mismatch_reasons,
+            "post_pz_transition_sanitation_applied": post_pz_transition_sanitation_applied,
+            "post_pz_transition_sanitation_reason": post_pz_transition_sanitation_reason,
+            "post_pz_transition_removed_message_count": post_pz_transition_removed_message_count,
+            "post_pz_transition_removed_obsolete_terminal_answer_count": (
+                post_pz_transition_removed_obsolete_terminal_answer_count
+            ),
+            "post_pz_transition_removed_pz_only_leakage_message_count": (
+                post_pz_transition_removed_pz_only_leakage_message_count
+            ),
+            "post_pz_transition_pre_sanitation_pz_only_leakage_present": (
+                post_pz_transition_pre_sanitation_pz_only_leakage_present
+            ),
+            "post_pz_transition_post_sanitation_pz_only_leakage_present": (
+                post_pz_transition_post_sanitation_pz_only_leakage_present
+            ),
+            "post_pz_transition_post_sanitation_contract_valid_for_cr": (
+                post_pz_transition_post_sanitation_contract_valid_for_cr
+            ),
+            "post_pz_transition_post_sanitation_mismatch_reasons": (
+                post_pz_transition_post_sanitation_mismatch_reasons
+            ),
             "post_pz_second_turn_protocol_event_type": post_pz_second_turn_protocol_event_type,
             "post_pz_second_turn_direct_final_without_cr": post_pz_second_turn_direct_final_without_cr,
             "post_pz_second_turn_called_cr": post_pz_second_turn_called_cr,
@@ -2029,6 +2271,27 @@ def _tool_loop_sample(
         ),
         post_pz_transition_contract_valid_for_cr=post_pz_transition_contract_valid_for_cr,
         post_pz_transition_mismatch_reasons=post_pz_transition_mismatch_reasons,
+        post_pz_transition_sanitation_applied=post_pz_transition_sanitation_applied,
+        post_pz_transition_sanitation_reason=post_pz_transition_sanitation_reason,
+        post_pz_transition_removed_message_count=post_pz_transition_removed_message_count,
+        post_pz_transition_removed_obsolete_terminal_answer_count=(
+            post_pz_transition_removed_obsolete_terminal_answer_count
+        ),
+        post_pz_transition_removed_pz_only_leakage_message_count=(
+            post_pz_transition_removed_pz_only_leakage_message_count
+        ),
+        post_pz_transition_pre_sanitation_pz_only_leakage_present=(
+            post_pz_transition_pre_sanitation_pz_only_leakage_present
+        ),
+        post_pz_transition_post_sanitation_pz_only_leakage_present=(
+            post_pz_transition_post_sanitation_pz_only_leakage_present
+        ),
+        post_pz_transition_post_sanitation_contract_valid_for_cr=(
+            post_pz_transition_post_sanitation_contract_valid_for_cr
+        ),
+        post_pz_transition_post_sanitation_mismatch_reasons=(
+            post_pz_transition_post_sanitation_mismatch_reasons
+        ),
         post_pz_second_turn_protocol_event_type=post_pz_second_turn_protocol_event_type,
         post_pz_second_turn_direct_final_without_cr=post_pz_second_turn_direct_final_without_cr,
         post_pz_second_turn_called_cr=post_pz_second_turn_called_cr,
@@ -2075,6 +2338,27 @@ def _tool_loop_sample(
             ),
             "post_pz_transition_contract_valid_for_cr": post_pz_transition_contract_valid_for_cr,
             "post_pz_transition_mismatch_reasons": post_pz_transition_mismatch_reasons,
+            "post_pz_transition_sanitation_applied": post_pz_transition_sanitation_applied,
+            "post_pz_transition_sanitation_reason": post_pz_transition_sanitation_reason,
+            "post_pz_transition_removed_message_count": post_pz_transition_removed_message_count,
+            "post_pz_transition_removed_obsolete_terminal_answer_count": (
+                post_pz_transition_removed_obsolete_terminal_answer_count
+            ),
+            "post_pz_transition_removed_pz_only_leakage_message_count": (
+                post_pz_transition_removed_pz_only_leakage_message_count
+            ),
+            "post_pz_transition_pre_sanitation_pz_only_leakage_present": (
+                post_pz_transition_pre_sanitation_pz_only_leakage_present
+            ),
+            "post_pz_transition_post_sanitation_pz_only_leakage_present": (
+                post_pz_transition_post_sanitation_pz_only_leakage_present
+            ),
+            "post_pz_transition_post_sanitation_contract_valid_for_cr": (
+                post_pz_transition_post_sanitation_contract_valid_for_cr
+            ),
+            "post_pz_transition_post_sanitation_mismatch_reasons": (
+                post_pz_transition_post_sanitation_mismatch_reasons
+            ),
             "post_pz_second_turn_protocol_event_type": post_pz_second_turn_protocol_event_type,
             "post_pz_second_turn_direct_final_without_cr": post_pz_second_turn_direct_final_without_cr,
             "post_pz_second_turn_called_cr": post_pz_second_turn_called_cr,
@@ -2148,6 +2432,9 @@ def run_tool_augmented(
     prompt_audit_summary = _prompt_audit_summary(prediction_records)
     zero_tool_behavior_summary = summarize_zero_tool_behavior(prediction_records)
     post_pz_transition_summary = summarize_post_pz_transition(prediction_records)
+    post_pz_transition_sanitation_summary = summarize_post_pz_transition_sanitation(
+        prediction_records
+    )
     first_turn_gate_summary = _first_turn_gate_summary(prediction_records)
     first_turn_gate_repair_summary = _first_turn_gate_repair_summary(prediction_records)
     first_turn_gate_repair_failure_families = _first_turn_gate_repair_failure_family_artifact(
@@ -2158,6 +2445,10 @@ def run_tool_augmented(
         metrics_dir=directories["metrics"],
     )
     post_pz_transition_sidecars = write_post_pz_transition_sidecars(
+        prediction_records=prediction_records,
+        metrics_dir=directories["metrics"],
+    )
+    post_pz_transition_sanitation_sidecars = write_post_pz_transition_sanitation_sidecars(
         prediction_records=prediction_records,
         metrics_dir=directories["metrics"],
     )
@@ -2182,6 +2473,7 @@ def run_tool_augmented(
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
         post_pz_transition_summary=post_pz_transition_summary,
+        post_pz_transition_sanitation_summary=post_pz_transition_sanitation_summary,
         first_turn_gate_summary=first_turn_gate_summary,
         first_turn_gate_repair_summary=first_turn_gate_repair_summary,
     )
@@ -2266,6 +2558,15 @@ def run_tool_augmented(
             "post_pz_transition_summary": post_pz_transition_sidecars["post_pz_transition_summary"],
             "per_dataset_post_pz_transition": post_pz_transition_sidecars["per_dataset_post_pz_transition"],
             "per_category_post_pz_transition": post_pz_transition_sidecars["per_category_post_pz_transition"],
+            "post_pz_transition_sanitation_summary": post_pz_transition_sanitation_sidecars[
+                "post_pz_transition_sanitation_summary"
+            ],
+            "per_dataset_post_pz_transition_sanitation": post_pz_transition_sanitation_sidecars[
+                "per_dataset_post_pz_transition_sanitation"
+            ],
+            "per_category_post_pz_transition_sanitation": post_pz_transition_sanitation_sidecars[
+                "per_category_post_pz_transition_sanitation"
+            ],
             "first_turn_gate_repair_failure_families": str(
                 first_turn_gate_repair_failure_families_path.resolve()
             ),
@@ -2278,6 +2579,7 @@ def run_tool_augmented(
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
         post_pz_transition_summary=post_pz_transition_summary,
+        post_pz_transition_sanitation_summary=post_pz_transition_sanitation_summary,
         first_turn_gate_summary=first_turn_gate_summary,
         first_turn_gate_repair_summary=first_turn_gate_repair_summary,
     )
@@ -2304,6 +2606,7 @@ def run_tool_augmented(
         "prompt_audit_summary": prompt_audit_summary,
         "zero_tool_behavior_summary": zero_tool_behavior_summary,
         "post_pz_transition_summary": post_pz_transition_summary,
+        "post_pz_transition_sanitation_summary": post_pz_transition_sanitation_summary,
         "first_turn_gate_summary": first_turn_gate_summary,
         "first_turn_gate_repair_summary": first_turn_gate_repair_summary,
         "notes": [

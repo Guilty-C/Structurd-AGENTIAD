@@ -118,6 +118,7 @@ Prompt 2.0 keeps [src/agentiad_recon/baseline.py](/home/zbr/project/lrrelevant/S
 - Prompt 2.8 adds a retry-only repair lane for recoverable first-turn gate retry outputs in valid `pz_cr` runs; it preserves original retry raw text, records repaired canonical `<tool_call>` text when recovery succeeds, and keeps strict parsing unchanged outside this bounded gate-repair path
 - Prompt 2.9 keeps that same gate-only repair lane but broadens bounded recovery to duplicated identical PZ-intent candidates and lossless bbox alias/list variants, while classifying unrecoverable retry outputs into explicit families such as pseudo-observation payloads, ambiguous multi-candidate outputs, bbox-not-lossless cases, unsupported payload shapes, and no-unique-candidate failures
 - Prompt 2.10 does not force CR use; it adds post-PZ second-turn transition audit sidecars plus run-level post-PZ transition summaries so the repo can distinguish a valid exposed CR contract from a degraded post-PZ prompt surface when the next assistant turn still skips CR
+- Prompt 2.11 does not force CR use; it sanitizes the active post-PZ second-turn runtime context by removing superseded first-turn assistant leakage from the gate-replaced terminal branch, while exporting pre/post sanitation prompt-surface evidence plus run-level sanitation summaries
 
 ## Trajectory Reconstruction For SFT
 

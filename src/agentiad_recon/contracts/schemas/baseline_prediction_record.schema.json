@@ -43,6 +43,15 @@
     "post_pz_transition_sidecar_path",
     "post_pz_transition_contract_valid_for_cr",
     "post_pz_transition_mismatch_reasons",
+    "post_pz_transition_sanitation_applied",
+    "post_pz_transition_sanitation_reason",
+    "post_pz_transition_removed_message_count",
+    "post_pz_transition_removed_obsolete_terminal_answer_count",
+    "post_pz_transition_removed_pz_only_leakage_message_count",
+    "post_pz_transition_pre_sanitation_pz_only_leakage_present",
+    "post_pz_transition_post_sanitation_pz_only_leakage_present",
+    "post_pz_transition_post_sanitation_contract_valid_for_cr",
+    "post_pz_transition_post_sanitation_mismatch_reasons",
     "post_pz_second_turn_protocol_event_type",
     "post_pz_second_turn_direct_final_without_cr",
     "post_pz_second_turn_called_cr",
@@ -167,6 +176,42 @@
       "type": ["boolean", "null"]
     },
     "post_pz_transition_mismatch_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "post_pz_transition_missing_reinserted_pz_result",
+          "post_pz_transition_missing_cr_tool",
+          "post_pz_transition_missing_query_image_instruction",
+          "post_pz_transition_pz_only_leakage",
+          "post_pz_transition_missing_tool_context"
+        ]
+      }
+    },
+    "post_pz_transition_sanitation_applied": { "type": "boolean" },
+    "post_pz_transition_sanitation_reason": { "type": "string", "minLength": 1 },
+    "post_pz_transition_removed_message_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "post_pz_transition_removed_obsolete_terminal_answer_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "post_pz_transition_removed_pz_only_leakage_message_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "post_pz_transition_pre_sanitation_pz_only_leakage_present": {
+      "type": "boolean"
+    },
+    "post_pz_transition_post_sanitation_pz_only_leakage_present": {
+      "type": "boolean"
+    },
+    "post_pz_transition_post_sanitation_contract_valid_for_cr": {
+      "type": ["boolean", "null"]
+    },
+    "post_pz_transition_post_sanitation_mismatch_reasons": {
       "type": "array",
       "items": {
         "type": "string",

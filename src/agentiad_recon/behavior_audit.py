@@ -261,6 +261,63 @@ def summarize_post_pz_transition(prediction_records: list[dict[str, Any]]) -> di
     }
 
 
+def summarize_post_pz_transition_sanitation(prediction_records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate post-PZ sanitation audit statistics across prediction records."""
+
+    event_records = [record for record in prediction_records if record.get("post_pz_transition_audited")]
+    failed_count_with_missing_reason_count = sum(
+        1
+        for record in event_records
+        if record.get("post_pz_second_turn_failure_reason")
+        and (record.get("failure_reason") is None or not str(record["failure_reason"]).strip())
+    )
+    return {
+        "post_pz_transition_sanitation_event_count": len(event_records),
+        "samples_with_post_pz_transition_sanitation_events": len(event_records),
+        "post_pz_transition_sanitation_applied_count": sum(
+            1 for record in event_records if record.get("post_pz_transition_sanitation_applied")
+        ),
+        "post_pz_transition_removed_message_total": sum(
+            int(record.get("post_pz_transition_removed_message_count", 0)) for record in event_records
+        ),
+        "post_pz_transition_removed_obsolete_terminal_answer_total": sum(
+            int(record.get("post_pz_transition_removed_obsolete_terminal_answer_count", 0))
+            for record in event_records
+        ),
+        "post_pz_transition_removed_pz_only_leakage_message_total": sum(
+            int(record.get("post_pz_transition_removed_pz_only_leakage_message_count", 0))
+            for record in event_records
+        ),
+        "post_pz_transition_pre_sanitation_pz_only_leakage_count": sum(
+            1
+            for record in event_records
+            if record.get("post_pz_transition_pre_sanitation_pz_only_leakage_present")
+        ),
+        "post_pz_transition_post_sanitation_pz_only_leakage_count": sum(
+            1
+            for record in event_records
+            if record.get("post_pz_transition_post_sanitation_pz_only_leakage_present")
+        ),
+        "post_pz_transition_post_sanitation_contract_valid_count": sum(
+            1
+            for record in event_records
+            if record.get("post_pz_transition_post_sanitation_contract_valid_for_cr") is True
+        ),
+        "post_pz_transition_post_sanitation_contract_mismatch_count": sum(
+            1
+            for record in event_records
+            if record.get("post_pz_transition_post_sanitation_contract_valid_for_cr") is False
+        ),
+        "post_pz_second_turn_direct_final_without_cr_count": sum(
+            1 for record in event_records if record.get("post_pz_second_turn_direct_final_without_cr")
+        ),
+        "post_pz_second_turn_called_cr_count": sum(
+            1 for record in event_records if record.get("post_pz_second_turn_called_cr")
+        ),
+        "failed_count_with_missing_reason_count": failed_count_with_missing_reason_count,
+    }
+
+
 def grouped_post_pz_transition(
     prediction_records: list[dict[str, Any]],
     *,
@@ -289,6 +346,48 @@ def grouped_post_pz_transition(
             "post_pz_second_turn_called_cr_count": summary["post_pz_second_turn_called_cr_count"],
             "post_pz_second_turn_called_non_cr_tool_count": summary[
                 "post_pz_second_turn_called_non_cr_tool_count"
+            ],
+            key_name: key,
+        }
+    return payload
+
+
+def grouped_post_pz_transition_sanitation(
+    prediction_records: list[dict[str, Any]],
+    *,
+    key_name: str,
+    key_fn: Any,
+) -> dict[str, dict[str, Any]]:
+    """Group prediction records and summarize post-PZ sanitation behavior for each key."""
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in prediction_records:
+        key = str(key_fn(record))
+        grouped.setdefault(key, []).append(record)
+
+    payload: dict[str, dict[str, Any]] = {}
+    for key in sorted(grouped):
+        records = grouped[key]
+        summary = summarize_post_pz_transition_sanitation(records)
+        payload[key] = {
+            "sample_count": len(records),
+            "post_pz_transition_sanitation_event_count": summary[
+                "post_pz_transition_sanitation_event_count"
+            ],
+            "post_pz_transition_sanitation_applied_count": summary[
+                "post_pz_transition_sanitation_applied_count"
+            ],
+            "post_pz_transition_post_sanitation_contract_valid_count": summary[
+                "post_pz_transition_post_sanitation_contract_valid_count"
+            ],
+            "post_pz_transition_post_sanitation_pz_only_leakage_count": summary[
+                "post_pz_transition_post_sanitation_pz_only_leakage_count"
+            ],
+            "post_pz_second_turn_direct_final_without_cr_count": summary[
+                "post_pz_second_turn_direct_final_without_cr_count"
+            ],
+            "post_pz_second_turn_called_cr_count": summary[
+                "post_pz_second_turn_called_cr_count"
             ],
             key_name: key,
         }
@@ -334,6 +433,48 @@ def write_post_pz_transition_sidecars(
         "post_pz_transition_summary": str(summary_path.resolve()),
         "per_dataset_post_pz_transition": str(per_dataset_path.resolve()),
         "per_category_post_pz_transition": str(per_category_path.resolve()),
+    }
+
+
+def write_post_pz_transition_sanitation_sidecars(
+    *,
+    prediction_records: list[dict[str, Any]],
+    metrics_dir: str | Path,
+) -> dict[str, str]:
+    """Write deterministic post-PZ sanitation summary artifacts."""
+
+    metrics_dir = Path(metrics_dir)
+    summary_path = metrics_dir / "post_pz_transition_sanitation_summary.json"
+    per_dataset_path = metrics_dir / "per_dataset_post_pz_transition_sanitation.json"
+    per_category_path = metrics_dir / "per_category_post_pz_transition_sanitation.json"
+
+    write_json(summary_path, summarize_post_pz_transition_sanitation(prediction_records))
+    write_json(
+        per_dataset_path,
+        {
+            "scope": "dataset",
+            "groups": grouped_post_pz_transition_sanitation(
+                prediction_records,
+                key_name="dataset",
+                key_fn=lambda record: record["metadata"].get("sample_source_kind", "unknown"),
+            ),
+        },
+    )
+    write_json(
+        per_category_path,
+        {
+            "scope": "category",
+            "groups": grouped_post_pz_transition_sanitation(
+                prediction_records,
+                key_name="category",
+                key_fn=lambda record: record["category"],
+            ),
+        },
+    )
+    return {
+        "post_pz_transition_sanitation_summary": str(summary_path.resolve()),
+        "per_dataset_post_pz_transition_sanitation": str(per_dataset_path.resolve()),
+        "per_category_post_pz_transition_sanitation": str(per_category_path.resolve()),
     }
 
 

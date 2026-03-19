@@ -188,6 +188,40 @@
         "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
       }
     },
+    "post_pz_transition_sanitation_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "post_pz_transition_sanitation_event_count",
+        "samples_with_post_pz_transition_sanitation_events",
+        "post_pz_transition_sanitation_applied_count",
+        "post_pz_transition_removed_message_total",
+        "post_pz_transition_removed_obsolete_terminal_answer_total",
+        "post_pz_transition_removed_pz_only_leakage_message_total",
+        "post_pz_transition_pre_sanitation_pz_only_leakage_count",
+        "post_pz_transition_post_sanitation_pz_only_leakage_count",
+        "post_pz_transition_post_sanitation_contract_valid_count",
+        "post_pz_transition_post_sanitation_contract_mismatch_count",
+        "post_pz_second_turn_direct_final_without_cr_count",
+        "post_pz_second_turn_called_cr_count",
+        "failed_count_with_missing_reason_count"
+      ],
+      "properties": {
+        "post_pz_transition_sanitation_event_count": { "type": "integer", "minimum": 0 },
+        "samples_with_post_pz_transition_sanitation_events": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_sanitation_applied_count": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_removed_message_total": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_removed_obsolete_terminal_answer_total": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_removed_pz_only_leakage_message_total": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_pre_sanitation_pz_only_leakage_count": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_post_sanitation_pz_only_leakage_count": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_post_sanitation_contract_valid_count": { "type": "integer", "minimum": 0 },
+        "post_pz_transition_post_sanitation_contract_mismatch_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_direct_final_without_cr_count": { "type": "integer", "minimum": 0 },
+        "post_pz_second_turn_called_cr_count": { "type": "integer", "minimum": 0 },
+        "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
+      }
+    },
     "first_turn_gate_summary": {
       "type": "object",
       "additionalProperties": false,
@@ -286,6 +320,9 @@
         "post_pz_transition_summary": { "type": "string", "minLength": 1 },
         "per_dataset_post_pz_transition": { "type": "string", "minLength": 1 },
         "per_category_post_pz_transition": { "type": "string", "minLength": 1 },
+        "post_pz_transition_sanitation_summary": { "type": "string", "minLength": 1 },
+        "per_dataset_post_pz_transition_sanitation": { "type": "string", "minLength": 1 },
+        "per_category_post_pz_transition_sanitation": { "type": "string", "minLength": 1 },
         "first_turn_gate_repair_failure_families": { "type": "string", "minLength": 1 },
         "tool_first_strategy_summary": { "type": "string", "minLength": 1 }
       }

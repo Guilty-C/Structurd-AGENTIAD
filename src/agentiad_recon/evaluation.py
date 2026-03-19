@@ -96,6 +96,15 @@ def build_prediction_record(
     post_pz_transition_sidecar_path: str | None,
     post_pz_transition_contract_valid_for_cr: bool | None,
     post_pz_transition_mismatch_reasons: list[str],
+    post_pz_transition_sanitation_applied: bool,
+    post_pz_transition_sanitation_reason: str,
+    post_pz_transition_removed_message_count: int,
+    post_pz_transition_removed_obsolete_terminal_answer_count: int,
+    post_pz_transition_removed_pz_only_leakage_message_count: int,
+    post_pz_transition_pre_sanitation_pz_only_leakage_present: bool,
+    post_pz_transition_post_sanitation_pz_only_leakage_present: bool,
+    post_pz_transition_post_sanitation_contract_valid_for_cr: bool | None,
+    post_pz_transition_post_sanitation_mismatch_reasons: list[str],
     post_pz_second_turn_protocol_event_type: str | None,
     post_pz_second_turn_direct_final_without_cr: bool,
     post_pz_second_turn_called_cr: bool,
@@ -153,6 +162,27 @@ def build_prediction_record(
         "post_pz_transition_sidecar_path": post_pz_transition_sidecar_path,
         "post_pz_transition_contract_valid_for_cr": post_pz_transition_contract_valid_for_cr,
         "post_pz_transition_mismatch_reasons": post_pz_transition_mismatch_reasons,
+        "post_pz_transition_sanitation_applied": post_pz_transition_sanitation_applied,
+        "post_pz_transition_sanitation_reason": post_pz_transition_sanitation_reason,
+        "post_pz_transition_removed_message_count": post_pz_transition_removed_message_count,
+        "post_pz_transition_removed_obsolete_terminal_answer_count": (
+            post_pz_transition_removed_obsolete_terminal_answer_count
+        ),
+        "post_pz_transition_removed_pz_only_leakage_message_count": (
+            post_pz_transition_removed_pz_only_leakage_message_count
+        ),
+        "post_pz_transition_pre_sanitation_pz_only_leakage_present": (
+            post_pz_transition_pre_sanitation_pz_only_leakage_present
+        ),
+        "post_pz_transition_post_sanitation_pz_only_leakage_present": (
+            post_pz_transition_post_sanitation_pz_only_leakage_present
+        ),
+        "post_pz_transition_post_sanitation_contract_valid_for_cr": (
+            post_pz_transition_post_sanitation_contract_valid_for_cr
+        ),
+        "post_pz_transition_post_sanitation_mismatch_reasons": (
+            post_pz_transition_post_sanitation_mismatch_reasons
+        ),
         "post_pz_second_turn_protocol_event_type": post_pz_second_turn_protocol_event_type,
         "post_pz_second_turn_direct_final_without_cr": post_pz_second_turn_direct_final_without_cr,
         "post_pz_second_turn_called_cr": post_pz_second_turn_called_cr,
@@ -255,6 +285,7 @@ def build_metrics_report(
     first_turn_gate_summary: dict[str, Any] | None = None,
     first_turn_gate_repair_summary: dict[str, Any] | None = None,
     post_pz_transition_summary: dict[str, Any] | None = None,
+    post_pz_transition_sanitation_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-seed, per-class, and mean/std inference metrics."""
 
@@ -336,6 +367,8 @@ def build_metrics_report(
         report["first_turn_gate_repair_summary"] = first_turn_gate_repair_summary
     if post_pz_transition_summary is not None:
         report["post_pz_transition_summary"] = post_pz_transition_summary
+    if post_pz_transition_sanitation_summary is not None:
+        report["post_pz_transition_sanitation_summary"] = post_pz_transition_sanitation_summary
     validate_payload(report, "baseline_metrics_report.schema.json")
     return report
 
@@ -376,6 +409,7 @@ def build_run_summary(
     first_turn_gate_summary: dict[str, Any] | None = None,
     first_turn_gate_repair_summary: dict[str, Any] | None = None,
     post_pz_transition_summary: dict[str, Any] | None = None,
+    post_pz_transition_sanitation_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one compact summary manifest for the evidence package."""
 
@@ -428,6 +462,8 @@ def build_run_summary(
         summary["first_turn_gate_repair_summary"] = first_turn_gate_repair_summary
     if post_pz_transition_summary is not None:
         summary["post_pz_transition_summary"] = post_pz_transition_summary
+    if post_pz_transition_sanitation_summary is not None:
+        summary["post_pz_transition_sanitation_summary"] = post_pz_transition_sanitation_summary
     validate_payload(summary, "baseline_run_summary.schema.json")
     return summary
 

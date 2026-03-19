@@ -1,4 +1,4 @@
-"""Prompt 2.10 tests for post-PZ second-turn CR transition audit instrumentation."""
+"""Prompt 2.11 tests for post-PZ second-turn runtime sanitation."""
 
 from __future__ import annotations
 
@@ -9,18 +9,22 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from agentiad_recon.backends import BackendRequest, BackendResponse, InferenceBackend
 from agentiad_recon.baseline import (
+    _append_final_answer_message,
+    _append_runtime_gate_reminder,
     _append_tool_request,
     _artifact_dirs,
     _post_pz_transition_payload,
     _prompt_history,
-    _sanitize_post_pz_transition_history,
     _runtime_config,
+    _sanitize_post_pz_transition_history,
     _tool_loop_sample,
+    _first_turn_protocol_gate_retry_instruction,
     load_run_definition,
     run_tool_augmented,
 )
@@ -47,10 +51,16 @@ def _direct_final_answer(think: str) -> str:
     )
 
 
+def _leaky_first_turn_final_answer() -> str:
+    return _direct_final_answer(
+        "The crop result is sufficient; no comparative retrieval is allowed in pz_only."
+    )
+
+
 class SequenceBackend(InferenceBackend):
     """Backend that returns a deterministic sequence of raw outputs."""
 
-    backend_name = "prompt_2_10_sequence_backend_v1"
+    backend_name = "prompt_2_11_sequence_backend_v1"
 
     def __init__(self, outputs: list[str]) -> None:
         self.outputs = outputs
@@ -65,8 +75,8 @@ class SequenceBackend(InferenceBackend):
         return BackendResponse(backend_name=self.backend_name, raw_output=self.outputs[index], metadata={})
 
 
-class Prompt210PostPZTransitionAuditTests(unittest.TestCase):
-    """Prompt 2.10 regression tests."""
+class Prompt211PostPZSanitationTests(unittest.TestCase):
+    """Prompt 2.11 regression tests."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -81,15 +91,26 @@ class Prompt210PostPZTransitionAuditTests(unittest.TestCase):
             runtime_overrides={"first_turn_protocol_gate_mode": "retry_once_pz_cr"},
         )
 
-    def _history_after_first_pz(self) -> list[dict[str, object]]:
+    def _contaminated_history_after_recovered_pz(self) -> list[dict[str, object]]:
         prompt_bundle = build_prompt(self.sample, tool_path="pz_cr")
         history = _prompt_history(prompt_bundle)
+        _append_final_answer_message(
+            history,
+            _leaky_first_turn_final_answer(),
+            backend_name="prompt_2_11_test_backend",
+            raw_output_path="/tmp/turn_0.txt",
+        )
+        _append_runtime_gate_reminder(
+            history,
+            _first_turn_protocol_gate_retry_instruction(),
+            gate_mode="retry_once_pz_cr",
+        )
         parsed_call = parse_tool_call(TOOL_CALL_PZ, tool_path="pz_cr")
         _append_tool_request(
             history,
             TOOL_CALL_PZ,
-            backend_name="prompt_2_10_test_backend",
-            raw_output_path="/tmp/turn_0.txt",
+            backend_name="prompt_2_11_test_backend",
+            raw_output_path="/tmp/turn_0.retry_1.txt",
             tool_name=parsed_call.tool_name,
             call_id=parsed_call.call_id,
         )
@@ -97,52 +118,16 @@ class Prompt210PostPZTransitionAuditTests(unittest.TestCase):
             parsed_call,
             sample=self.sample,
             sample_pool=self.samples,
-            artifact_dir=Path(tempfile.gettempdir()) / "prompt_2_10_tool_artifacts",
+            artifact_dir=Path(tempfile.gettempdir()) / "prompt_2_11_tool_artifacts",
         )
         return reinsert_tool_result(history, tool_result)
 
-    def test_valid_post_pz_transition_contract(self) -> None:
-        """A realistic post-PZ second-turn surface should validate when CR remains visible."""
-
-        payload = _post_pz_transition_payload(
-            pre_sanitation_history=self._history_after_first_pz(),
-            post_sanitation_history=self._history_after_first_pz(),
-            sample_id=self.sample["sample_id"],
-            tool_mode="pz_cr",
-            first_tool_name="PZ",
-            first_tool_turn_index=0,
-            first_turn_gate_outcome="recovered_to_tool_call",
-            first_turn_retry_repair_involved=False,
-            post_pz_assistant_turn_index=1,
-            prior_tool_trace_count=1,
-            sanitation_audit={
-                "sanitation_applied": False,
-                "sanitation_reason": "not_needed",
-                "removed_message_count": 0,
-                "removed_obsolete_terminal_answer_count": 0,
-                "removed_pz_only_leakage_message_count": 0,
-                "removed_message_role_sequence": [],
-                "removed_message_digests": [],
-            },
-        )
-
-        self.assertTrue(payload["transition_contract_valid_for_cr"])
-        self.assertEqual(payload["transition_mismatch_reasons"], [])
-        self.assertTrue(payload["pz_result_reinserted_present"])
-        self.assertTrue(payload["cr_available_in_prompt_surface"])
-
-    def test_invalid_post_pz_transition_contract_missing_cr(self) -> None:
-        """Missing CR availability on the post-PZ surface should be classified explicitly."""
-
-        history = self._history_after_first_pz()
-        history[1]["content"] = history[1]["content"].replace(
-            "Available tools: PZ and CR. Use PZ for localized crop/zoom, and CR only when you need a same-category normal reference exemplar.",
-            "Available tools: PZ. Use PZ for localized crop/zoom.",
-        )
-
-        payload = _post_pz_transition_payload(
+    def _sanitized_payload(self) -> dict[str, object]:
+        history = self._contaminated_history_after_recovered_pz()
+        sanitized_history, sanitation_audit = _sanitize_post_pz_transition_history(history)
+        return _post_pz_transition_payload(
             pre_sanitation_history=history,
-            post_sanitation_history=history,
+            post_sanitation_history=sanitized_history,
             sample_id=self.sample["sample_id"],
             tool_mode="pz_cr",
             first_tool_name="PZ",
@@ -151,59 +136,48 @@ class Prompt210PostPZTransitionAuditTests(unittest.TestCase):
             first_turn_retry_repair_involved=False,
             post_pz_assistant_turn_index=1,
             prior_tool_trace_count=1,
-            sanitation_audit={
-                "sanitation_applied": False,
-                "sanitation_reason": "not_needed",
-                "removed_message_count": 0,
-                "removed_obsolete_terminal_answer_count": 0,
-                "removed_pz_only_leakage_message_count": 0,
-                "removed_message_role_sequence": [],
-                "removed_message_digests": [],
-            },
+            sanitation_audit=sanitation_audit,
         )
 
-        self.assertFalse(payload["transition_contract_valid_for_cr"])
-        self.assertIn("post_pz_transition_missing_cr_tool", payload["transition_mismatch_reasons"])
+    def test_sanitation_removes_obsolete_terminal_answer_branch(self) -> None:
+        payload = self._sanitized_payload()
 
-    def test_invalid_post_pz_transition_contract_pz_only_leakage(self) -> None:
-        """PZ-only leakage on the post-PZ surface should be classified explicitly."""
+        self.assertTrue(payload["sanitation_applied"])
+        self.assertGreater(payload["removed_obsolete_terminal_answer_count"], 0)
+        self.assertGreater(payload["removed_message_count"], 0)
 
-        history = self._history_after_first_pz()
-        history[1]["content"] = history[1]["content"].replace(
-            "Available tools: PZ and CR. Use PZ for localized crop/zoom, and CR only when you need a same-category normal reference exemplar.",
-            "Available tools: PZ only. If you need a crop, emit exactly one <tool_call> block for PZ. Do not request CR in this mode.",
+    def test_sanitation_removes_pz_only_leakage_from_active_surface(self) -> None:
+        payload = self._sanitized_payload()
+
+        self.assertTrue(payload["pre_sanitation_pz_only_leakage_present"])
+        self.assertFalse(payload["post_sanitation_pz_only_leakage_present"])
+
+    def test_sanitation_preserves_valid_system_user_and_tool_result_messages(self) -> None:
+        history = self._contaminated_history_after_recovered_pz()
+        sanitized_history, _sanitation_audit = _sanitize_post_pz_transition_history(history)
+
+        self.assertEqual(sanitized_history[0]["role"], "system")
+        self.assertEqual(sanitized_history[1]["role"], "user")
+        self.assertTrue(
+            any(
+                message["role"] == "tool"
+                and message["message_type"] == "tool_result"
+                and message.get("tool_name") == "PZ"
+                for message in sanitized_history
+            )
         )
 
-        payload = _post_pz_transition_payload(
-            pre_sanitation_history=history,
-            post_sanitation_history=history,
-            sample_id=self.sample["sample_id"],
-            tool_mode="pz_cr",
-            first_tool_name="PZ",
-            first_tool_turn_index=0,
-            first_turn_gate_outcome="recovered_to_tool_call",
-            first_turn_retry_repair_involved=False,
-            post_pz_assistant_turn_index=1,
-            prior_tool_trace_count=1,
-            sanitation_audit={
-                "sanitation_applied": False,
-                "sanitation_reason": "not_needed",
-                "removed_message_count": 0,
-                "removed_obsolete_terminal_answer_count": 0,
-                "removed_pz_only_leakage_message_count": 0,
-                "removed_message_role_sequence": [],
-                "removed_message_digests": [],
-            },
-        )
+    def test_post_sanitized_transition_contract_becomes_valid_for_cr(self) -> None:
+        payload = self._sanitized_payload()
 
-        self.assertFalse(payload["transition_contract_valid_for_cr"])
         self.assertIn("post_pz_transition_pz_only_leakage", payload["transition_mismatch_reasons"])
+        self.assertTrue(payload["post_sanitation_transition_contract_valid_for_cr"])
+        self.assertEqual(payload["post_sanitation_transition_mismatch_reasons"], [])
 
-    def test_second_turn_direct_final_after_valid_cr_contract(self) -> None:
-        """A direct final answer after PZ should remain parser-valid while being behaviorally auditable."""
-
+    def test_second_turn_direct_final_after_sanitized_valid_cr_contract(self) -> None:
         backend = SequenceBackend(
             [
+                _leaky_first_turn_final_answer(),
                 TOOL_CALL_PZ,
                 _direct_final_answer("second turn direct final answer"),
             ]
@@ -221,20 +195,18 @@ class Prompt210PostPZTransitionAuditTests(unittest.TestCase):
             )
             sidecar = json.loads(Path(record["post_pz_transition_sidecar_path"]).read_text(encoding="utf-8"))
 
-        self.assertTrue(record["post_pz_transition_audited"])
-        self.assertTrue(record["post_pz_transition_contract_valid_for_cr"])
+        self.assertTrue(record["post_pz_transition_sanitation_applied"])
+        self.assertTrue(record["post_pz_transition_post_sanitation_contract_valid_for_cr"])
         self.assertTrue(record["post_pz_second_turn_direct_final_without_cr"])
         self.assertFalse(record["post_pz_second_turn_called_cr"])
         self.assertTrue(record["parser_valid"])
         self.assertTrue(record["schema_valid"])
-        self.assertEqual(sidecar["second_turn_protocol_event_type"], "final_answer")
-        self.assertTrue(sidecar["second_turn_terminal_without_cr"])
+        self.assertFalse(sidecar["post_sanitation_pz_only_leakage_present"])
 
-    def test_second_turn_cr_call_case_is_recorded(self) -> None:
-        """A real CR call on the second turn should be auditable as a successful transition."""
-
+    def test_second_turn_cr_call_after_sanitized_valid_cr_contract(self) -> None:
         backend = SequenceBackend(
             [
+                _leaky_first_turn_final_answer(),
                 TOOL_CALL_PZ,
                 TOOL_CALL_CR,
                 _direct_final_answer("answer after CR"),
@@ -252,16 +224,14 @@ class Prompt210PostPZTransitionAuditTests(unittest.TestCase):
                 directories=directories,
             )
 
-        self.assertTrue(record["post_pz_transition_audited"])
-        self.assertTrue(record["post_pz_transition_contract_valid_for_cr"])
+        self.assertTrue(record["post_pz_transition_post_sanitation_contract_valid_for_cr"])
         self.assertTrue(record["post_pz_second_turn_called_cr"])
         self.assertFalse(record["post_pz_second_turn_direct_final_without_cr"])
 
     def test_summary_aggregation_and_sidecar_integration(self) -> None:
-        """Summary, manifest, and metrics should expose post-PZ transition aggregates."""
-
         backend = SequenceBackend(
             [
+                _leaky_first_turn_final_answer(),
                 TOOL_CALL_PZ,
                 TOOL_CALL_CR,
                 _direct_final_answer("answer after CR"),
@@ -283,18 +253,17 @@ class Prompt210PostPZTransitionAuditTests(unittest.TestCase):
             metrics = result["metrics_report"]
 
         for payload in (summary, manifest, metrics):
-            transition = payload["post_pz_transition_summary"]
-            self.assertEqual(transition["post_pz_transition_event_count"], 1)
-            self.assertEqual(transition["post_pz_transition_contract_valid_count"], 1)
-            self.assertEqual(transition["post_pz_transition_contract_mismatch_count"], 0)
-            self.assertEqual(transition["post_pz_second_turn_called_cr_count"], 1)
-            self.assertEqual(transition["post_pz_second_turn_direct_final_without_cr_count"], 0)
-            self.assertEqual(transition["failed_count_with_missing_reason_count"], 0)
+            sanitation = payload["post_pz_transition_sanitation_summary"]
+            self.assertEqual(sanitation["post_pz_transition_sanitation_event_count"], 1)
+            self.assertEqual(sanitation["post_pz_transition_sanitation_applied_count"], 1)
+            self.assertEqual(sanitation["post_pz_transition_post_sanitation_contract_valid_count"], 1)
+            self.assertEqual(sanitation["post_pz_transition_post_sanitation_pz_only_leakage_count"], 0)
+            self.assertEqual(sanitation["post_pz_second_turn_called_cr_count"], 1)
 
         for key in (
-            "post_pz_transition_summary",
-            "per_dataset_post_pz_transition",
-            "per_category_post_pz_transition",
+            "post_pz_transition_sanitation_summary",
+            "per_dataset_post_pz_transition_sanitation",
+            "per_category_post_pz_transition_sanitation",
         ):
             self.assertIn(key, summary["artifact_paths"])
 
