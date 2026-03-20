@@ -210,6 +210,14 @@
           "type": ["string", "null"],
           "minLength": 1
         },
+        "num_shards": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shard_index": {
+          "type": "integer",
+          "minimum": 0
+        },
         "generation": {
           "type": "object",
           "additionalProperties": false,

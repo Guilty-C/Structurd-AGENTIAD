@@ -314,6 +314,7 @@ def build_metrics_report(
     post_pz_transition_sanitation_summary: dict[str, Any] | None = None,
     post_pz_second_turn_gate_summary: dict[str, Any] | None = None,
     timing_summary: dict[str, Any] | None = None,
+    shard_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-seed, per-class, and mean/std inference metrics."""
 
@@ -413,6 +414,8 @@ def build_metrics_report(
         report["post_pz_second_turn_gate_summary"] = post_pz_second_turn_gate_summary
     if timing_summary is not None:
         report["timing_summary"] = timing_summary
+    if shard_summary is not None:
+        report["shard_summary"] = shard_summary
     validate_payload(report, "baseline_metrics_report.schema.json")
     return report
 
@@ -463,6 +466,7 @@ def build_run_summary(
     post_pz_second_turn_gate_summary: dict[str, Any] | None = None,
     timing_summary: dict[str, Any] | None = None,
     core_artifacts_written_before_optional_tail_work: bool | None = None,
+    shard_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one compact summary manifest for the evidence package."""
 
@@ -537,6 +541,8 @@ def build_run_summary(
         summary["core_artifacts_written_before_optional_tail_work"] = (
             core_artifacts_written_before_optional_tail_work
         )
+    if shard_summary is not None:
+        summary["shard_summary"] = shard_summary
     validate_payload(summary, "baseline_run_summary.schema.json")
     return summary
 

@@ -87,6 +87,7 @@ GENERATION_OVERRIDE_STAGES = (
     "post_pz_second_turn_retry",
     "final_answer",
 )
+SHARDING_STRATEGY = "stable_index_mod"
 
 
 class InferenceRunError(RuntimeError):
@@ -163,6 +164,8 @@ def _runtime_defaults() -> dict[str, Any]:
         "progress_mode": "off",
         "progress_update_every_n_samples": 1,
         "progress_snapshot_path": None,
+        "num_shards": 1,
+        "shard_index": 0,
     }
 
 
@@ -449,6 +452,8 @@ def _runtime_config(
         "progress_mode",
         "progress_update_every_n_samples",
         "progress_snapshot_path",
+        "num_shards",
+        "shard_index",
     ):
         if runtime_overrides and key in runtime_overrides and runtime_overrides[key] is not None:
             config[key] = runtime_overrides[key]
@@ -483,6 +488,12 @@ def _runtime_config(
         raise InferenceRunError(f"Unsupported progress_mode: {config['progress_mode']!r}")
     if int(config["progress_update_every_n_samples"]) < 1:
         raise InferenceRunError("progress_update_every_n_samples must be >= 1")
+    if int(config["num_shards"]) < 1:
+        raise InferenceRunError("num_shards must be >= 1")
+    if int(config["shard_index"]) < 0:
+        raise InferenceRunError("shard_index must be >= 0")
+    if int(config["shard_index"]) >= int(config["num_shards"]):
+        raise InferenceRunError("shard_index must be < num_shards")
 
     resolved_dataset_root = _resolve_path(dataset_root or definition["sample_source"]["path"])
     config["dataset_root"] = str(resolved_dataset_root)
@@ -500,6 +511,8 @@ def _resolved_runtime_provenance(
     definition: dict[str, Any],
     runtime_config: dict[str, Any],
     backend: InferenceBackend,
+    *,
+    shard_summary: dict[str, Any],
 ) -> dict[str, Any]:
     """Merge requested runtime settings with backend-reported effective state."""
 
@@ -533,6 +546,11 @@ def _resolved_runtime_provenance(
         "progress_mode": runtime_config["progress_mode"],
         "progress_update_every_n_samples": runtime_config["progress_update_every_n_samples"],
         "progress_snapshot_path": runtime_config["progress_snapshot_path"],
+        "num_shards": shard_summary["num_shards"],
+        "shard_index": shard_summary["shard_index"],
+        "full_sample_count": shard_summary["full_sample_count"],
+        "selected_sample_count": shard_summary["selected_sample_count"],
+        "sharding_strategy": shard_summary["sharding_strategy"],
     }
 
 
@@ -586,6 +604,32 @@ def _load_samples(
     if not samples:
         raise InferenceRunError("No canonical samples were selected for the inference run.")
     return samples
+
+
+def _select_shard_samples(
+    all_samples: list[dict[str, Any]],
+    *,
+    num_shards: int,
+    shard_index: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Select one deterministic shard from the stable enumerated sample list."""
+
+    if num_shards < 1:
+        raise InferenceRunError("num_shards must be >= 1")
+    if shard_index < 0:
+        raise InferenceRunError("shard_index must be >= 0")
+    if shard_index >= num_shards:
+        raise InferenceRunError("shard_index must be < num_shards")
+    selected_samples = [
+        sample for index, sample in enumerate(all_samples) if index % num_shards == shard_index
+    ]
+    return selected_samples, {
+        "num_shards": num_shards,
+        "shard_index": shard_index,
+        "full_sample_count": len(all_samples),
+        "selected_sample_count": len(selected_samples),
+        "sharding_strategy": SHARDING_STRATEGY,
+    }
 
 
 def _write_text(path: str | Path, payload: str) -> None:
@@ -1643,9 +1687,20 @@ def run_baseline(
         runtime_overrides=runtime_overrides,
     )
     backend = _select_backend(definition["backend"], runtime_config=runtime_config)
-    samples = _load_samples(definition, dataset_root=dataset_root, max_samples=max_samples)
+    all_samples = _load_samples(definition, dataset_root=dataset_root, max_samples=max_samples)
+    samples, shard_summary = _select_shard_samples(
+        all_samples,
+        num_shards=int(runtime_config["num_shards"]),
+        shard_index=int(runtime_config["shard_index"]),
+    )
     root = _resolve_path(artifact_root or definition["artifacts"]["root"])
     directories = _artifact_dirs(definition, root)
+    runtime_provenance = _resolved_runtime_provenance(
+        definition,
+        runtime_config,
+        backend,
+        shard_summary=shard_summary,
+    )
     progress_snapshot_path = None
     if runtime_config["progress_mode"] != "off":
         progress_snapshot_path = Path(
@@ -1835,11 +1890,7 @@ def run_baseline(
                     "backend_metadata": response.metadata,
                     "sample_source_kind": sample["metadata"].get("dataset_kind"),
                     "timing": dict(sample_timing),
-                    "runtime_provenance": _resolved_runtime_provenance(
-                        definition,
-                        runtime_config,
-                        backend,
-                    ),
+                    "runtime_provenance": runtime_provenance,
                 },
                 **build_zero_tool_behavior_fields(
                     first_protocol_event_type=first_protocol_event_type,
@@ -1878,7 +1929,6 @@ def run_baseline(
         force=True,
     )
 
-    runtime_provenance = _resolved_runtime_provenance(definition, runtime_config, backend)
     timing_summary = (
         _timing_summary_from_prediction_records(prediction_records)
         if runtime_config["timing_enabled"]
@@ -1899,6 +1949,7 @@ def run_baseline(
         timing_enabled=runtime_provenance["timing_enabled"],
         progress_mode=runtime_provenance["progress_mode"],
         timing_summary=timing_summary,
+        shard_summary=shard_summary,
     )
     metrics_report_path = directories["metrics"] / "metrics_report.json"
     per_seed_metrics_path = directories["metrics"] / "per_seed_metrics.json"
@@ -1957,6 +2008,7 @@ def run_baseline(
         },
         notes=definition.get("notes", []),
         timing_summary=timing_summary,
+        shard_summary=shard_summary,
     )
     summary_path = directories["root"] / "run_summary.json"
     write_json(summary_path, summary)
@@ -1979,6 +2031,7 @@ def run_baseline(
         "timing_enabled": runtime_provenance["timing_enabled"],
         "progress_mode": runtime_provenance["progress_mode"],
         "run_provenance": runtime_provenance,
+        "shard_summary": shard_summary,
         **({"timing_summary": timing_summary} if timing_summary is not None else {}),
         "notes": [
             "Non-tool baseline summary manifest.",
@@ -2001,6 +2054,7 @@ def run_baseline(
         "run_manifest_path": str(run_manifest_path.resolve()),
         "summary_path": str(summary_path.resolve()),
         "runtime_provenance": runtime_provenance,
+        "shard_summary": shard_summary,
     }
 
 
@@ -2019,6 +2073,7 @@ def _tool_loop_sample(
     *,
     definition: dict[str, Any],
     backend: InferenceBackend,
+    runtime_provenance: dict[str, Any] | None = None,
     runtime_config: dict[str, Any],
     sample: dict[str, Any],
     sample_pool: list[dict[str, Any]],
@@ -2026,6 +2081,20 @@ def _tool_loop_sample(
     directories: dict[str, Path],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Execute the bounded tool loop for one sample and return its artifacts."""
+
+    if runtime_provenance is None:
+        runtime_provenance = _resolved_runtime_provenance(
+            definition,
+            runtime_config,
+            backend,
+            shard_summary={
+                "num_shards": int(runtime_config.get("num_shards", 1)),
+                "shard_index": int(runtime_config.get("shard_index", 0)),
+                "full_sample_count": len(sample_pool),
+                "selected_sample_count": len(sample_pool),
+                "sharding_strategy": SHARDING_STRATEGY,
+            },
+        )
 
     sample_timing = _new_timing_counters()
     prompt_stage_start = time.perf_counter()
@@ -3373,11 +3442,7 @@ def _tool_loop_sample(
             ),
             "post_pz_transition": post_pz_transition_sidecar,
             "timing": dict(sample_timing),
-            "runtime_provenance": _resolved_runtime_provenance(
-                definition,
-                runtime_config,
-                backend,
-            ),
+            "runtime_provenance": runtime_provenance,
         },
         **build_zero_tool_behavior_fields(
             first_protocol_event_type=first_protocol_event_type,
@@ -3426,9 +3491,20 @@ def run_tool_augmented(
         runtime_overrides=runtime_overrides,
     )
     backend = _select_backend(definition["backend"], runtime_config=runtime_config)
-    samples = _load_samples(definition, dataset_root=dataset_root, max_samples=max_samples)
+    all_samples = _load_samples(definition, dataset_root=dataset_root, max_samples=max_samples)
+    samples, shard_summary = _select_shard_samples(
+        all_samples,
+        num_shards=int(runtime_config["num_shards"]),
+        shard_index=int(runtime_config["shard_index"]),
+    )
     root = _resolve_path(artifact_root or definition["artifacts"]["root"])
     directories = _artifact_dirs(definition, root)
+    runtime_provenance = _resolved_runtime_provenance(
+        definition,
+        runtime_config,
+        backend,
+        shard_summary=shard_summary,
+    )
     progress_snapshot_path = None
     if runtime_config["progress_mode"] != "off":
         progress_snapshot_path = Path(
@@ -3455,6 +3531,7 @@ def run_tool_augmented(
             record, _trace_payload = _tool_loop_sample(
                 definition=definition,
                 backend=backend,
+                runtime_provenance=runtime_provenance,
                 runtime_config=runtime_config,
                 sample=sample,
                 sample_pool=samples,
@@ -3485,7 +3562,6 @@ def run_tool_augmented(
         force=True,
     )
 
-    runtime_provenance = _resolved_runtime_provenance(definition, runtime_config, backend)
     normalization_summary = _normalization_summary(prediction_records)
     prompt_audit_summary = _prompt_audit_summary(prediction_records)
     zero_tool_behavior_summary = summarize_zero_tool_behavior(prediction_records)
@@ -3552,6 +3628,7 @@ def run_tool_augmented(
         first_turn_gate_summary=first_turn_gate_summary,
         first_turn_gate_repair_summary=first_turn_gate_repair_summary,
         timing_summary=timing_summary,
+        shard_summary=shard_summary,
     )
     metrics_report_path = directories["metrics"] / "metrics_report.json"
     per_seed_metrics_path = directories["metrics"] / "per_seed_metrics.json"
@@ -3658,6 +3735,7 @@ def run_tool_augmented(
         first_turn_gate_repair_summary=first_turn_gate_repair_summary,
         timing_summary=timing_summary,
         core_artifacts_written_before_optional_tail_work=core_artifacts_written_before_optional_tail_work,
+        shard_summary=shard_summary,
     )
     summary_path = directories["root"] / "run_summary.json"
     write_json(summary_path, summary)
@@ -3683,6 +3761,7 @@ def run_tool_augmented(
         "timing_enabled": runtime_provenance["timing_enabled"],
         "progress_mode": runtime_provenance["progress_mode"],
         "run_provenance": runtime_provenance,
+        "shard_summary": shard_summary,
         "normalization_summary": normalization_summary,
         "prompt_audit_summary": prompt_audit_summary,
         "zero_tool_behavior_summary": zero_tool_behavior_summary,
@@ -3757,6 +3836,7 @@ def run_tool_augmented(
         "run_manifest_path": str(run_manifest_path.resolve()),
         "summary_path": str(summary_path.resolve()),
         "runtime_provenance": runtime_provenance,
+        "shard_summary": shard_summary,
         **(
             {"delta_report_path": str(delta_report_path.resolve())}
             if runtime_config["emit_delta_report"]
@@ -3816,18 +3896,37 @@ def dry_run_from_config(
     )
     backend = _select_backend(definition["backend"], runtime_config=runtime_config)
     try:
-        sample_count = len(_load_samples(definition, dataset_root=dataset_root, max_samples=max_samples))
+        all_samples = _load_samples(definition, dataset_root=dataset_root, max_samples=max_samples)
+        selected_samples, shard_summary = _select_shard_samples(
+            all_samples,
+            num_shards=int(runtime_config["num_shards"]),
+            shard_index=int(runtime_config["shard_index"]),
+        )
+        sample_count = len(selected_samples)
     except InferenceRunError as exc:
         if "No canonical samples were selected" not in str(exc):
             raise
         sample_count = 0
+        shard_summary = {
+            "num_shards": int(runtime_config["num_shards"]),
+            "shard_index": int(runtime_config["shard_index"]),
+            "full_sample_count": 0,
+            "selected_sample_count": 0,
+            "sharding_strategy": SHARDING_STRATEGY,
+        }
     artifact_root_path = _resolve_path(artifact_root or definition["artifacts"]["root"])
     return {
         "run_id": definition["run_id"],
         "mode": definition["mode"],
         "sample_count": sample_count,
         "artifact_root": str(artifact_root_path),
-        "runtime_provenance": _resolved_runtime_provenance(definition, runtime_config, backend),
+        "runtime_provenance": _resolved_runtime_provenance(
+            definition,
+            runtime_config,
+            backend,
+            shard_summary=shard_summary,
+        ),
+        "shard_summary": shard_summary,
     }
 
 
@@ -3841,6 +3940,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-root", help="Optional dataset root override.")
     parser.add_argument("--artifact-root", help="Optional artifact root override.")
     parser.add_argument("--max-samples", type=int, help="Optional sample limit override.")
+    parser.add_argument("--num-shards", type=int, default=1, help="Deterministic shard count. Default: 1.")
+    parser.add_argument("--shard-index", type=int, default=0, help="Deterministic shard index in [0, num_shards). Default: 0.")
     parser.add_argument("--base-model-path", help="Optional base model path override.")
     parser.add_argument("--adapter-checkpoint-path", help="Optional LoRA adapter checkpoint override.")
     parser.add_argument("--checkpoint-step", type=int, help="Optional checkpoint step override.")
@@ -3943,6 +4044,8 @@ def main() -> int:
         "progress_mode": args.progress_mode,
         "progress_update_every_n_samples": args.progress_update_every_n_samples,
         "progress_snapshot_path": args.progress_snapshot_path,
+        "num_shards": args.num_shards,
+        "shard_index": args.shard_index,
         "generation": {
             key: value
             for key, value in {
@@ -3984,4 +4087,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except InferenceRunError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc

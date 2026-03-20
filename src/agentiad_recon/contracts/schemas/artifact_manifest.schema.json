@@ -74,6 +74,9 @@
       "type": "string",
       "enum": ["off", "auto", "bar", "log"]
     },
+    "shard_summary": {
+      "$ref": "#/$defs/shardSummary"
+    },
     "run_provenance": {
       "type": "object",
       "additionalProperties": false,
@@ -105,7 +108,12 @@
         "timing_enabled",
         "progress_mode",
         "progress_update_every_n_samples",
-        "progress_snapshot_path"
+        "progress_snapshot_path",
+        "num_shards",
+        "shard_index",
+        "full_sample_count",
+        "selected_sample_count",
+        "sharding_strategy"
       ],
       "properties": {
         "runtime_backend_name": { "type": "string", "minLength": 1 },
@@ -181,6 +189,26 @@
         },
         "progress_snapshot_path": {
           "type": ["string", "null"]
+        },
+        "num_shards": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "shard_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "full_sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "selected_sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sharding_strategy": {
+          "type": "string",
+          "const": "stable_index_mod"
         }
       }
     },
@@ -426,6 +454,27 @@
     }
   },
   "$defs": {
+    "shardSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "num_shards",
+        "shard_index",
+        "full_sample_count",
+        "selected_sample_count",
+        "sharding_strategy"
+      ],
+      "properties": {
+        "num_shards": { "type": "integer", "minimum": 1 },
+        "shard_index": { "type": "integer", "minimum": 0 },
+        "full_sample_count": { "type": "integer", "minimum": 0 },
+        "selected_sample_count": { "type": "integer", "minimum": 0 },
+        "sharding_strategy": {
+          "type": "string",
+          "const": "stable_index_mod"
+        }
+      }
+    },
     "generationOverride": {
       "type": "object",
       "additionalProperties": false,
