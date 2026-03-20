@@ -298,9 +298,14 @@ def build_metrics_report(
     prediction_records: list[dict[str, Any]],
     seeds: list[int],
     runtime_provenance: dict[str, Any],
+    artifact_level: str | None = None,
+    emit_baseline_compare: bool | None = None,
+    emit_delta_report: bool | None = None,
     tool_first_intervention_strategy: str | None = None,
     first_turn_protocol_gate_mode: str | None = None,
     post_pz_second_turn_gate_mode: str | None = None,
+    timing_enabled: bool | None = None,
+    progress_mode: str | None = None,
     prompt_audit_summary: dict[str, int] | None = None,
     zero_tool_behavior_summary: dict[str, Any] | None = None,
     first_turn_gate_summary: dict[str, Any] | None = None,
@@ -308,6 +313,7 @@ def build_metrics_report(
     post_pz_transition_summary: dict[str, Any] | None = None,
     post_pz_transition_sanitation_summary: dict[str, Any] | None = None,
     post_pz_second_turn_gate_summary: dict[str, Any] | None = None,
+    timing_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-seed, per-class, and mean/std inference metrics."""
 
@@ -375,12 +381,22 @@ def build_metrics_report(
         "per_class_metrics": per_class_metrics,
         "aggregate_metrics": aggregate_metrics,
     }
+    if artifact_level is not None:
+        report["artifact_level"] = artifact_level
+    if emit_baseline_compare is not None:
+        report["emit_baseline_compare"] = emit_baseline_compare
+    if emit_delta_report is not None:
+        report["emit_delta_report"] = emit_delta_report
     if tool_first_intervention_strategy is not None:
         report["tool_first_intervention_strategy"] = tool_first_intervention_strategy
     if first_turn_protocol_gate_mode is not None:
         report["first_turn_protocol_gate_mode"] = first_turn_protocol_gate_mode
     if post_pz_second_turn_gate_mode is not None:
         report["post_pz_second_turn_gate_mode"] = post_pz_second_turn_gate_mode
+    if timing_enabled is not None:
+        report["timing_enabled"] = timing_enabled
+    if progress_mode is not None:
+        report["progress_mode"] = progress_mode
     if prompt_audit_summary is not None:
         report["prompt_audit_summary"] = prompt_audit_summary
     if zero_tool_behavior_summary is not None:
@@ -395,6 +411,8 @@ def build_metrics_report(
         report["post_pz_transition_sanitation_summary"] = post_pz_transition_sanitation_summary
     if post_pz_second_turn_gate_summary is not None:
         report["post_pz_second_turn_gate_summary"] = post_pz_second_turn_gate_summary
+    if timing_summary is not None:
+        report["timing_summary"] = timing_summary
     validate_payload(report, "baseline_metrics_report.schema.json")
     return report
 
@@ -427,9 +445,14 @@ def build_run_summary(
     runtime_provenance: dict[str, Any],
     artifact_paths: dict[str, str],
     notes: list[str] | None = None,
+    artifact_level: str | None = None,
+    emit_baseline_compare: bool | None = None,
+    emit_delta_report: bool | None = None,
     tool_first_intervention_strategy: str | None = None,
     first_turn_protocol_gate_mode: str | None = None,
     post_pz_second_turn_gate_mode: str | None = None,
+    timing_enabled: bool | None = None,
+    progress_mode: str | None = None,
     normalization_summary: dict[str, int] | None = None,
     prompt_audit_summary: dict[str, int] | None = None,
     zero_tool_behavior_summary: dict[str, Any] | None = None,
@@ -438,6 +461,8 @@ def build_run_summary(
     post_pz_transition_summary: dict[str, Any] | None = None,
     post_pz_transition_sanitation_summary: dict[str, Any] | None = None,
     post_pz_second_turn_gate_summary: dict[str, Any] | None = None,
+    timing_summary: dict[str, Any] | None = None,
+    core_artifacts_written_before_optional_tail_work: bool | None = None,
 ) -> dict[str, Any]:
     """Create one compact summary manifest for the evidence package."""
 
@@ -474,12 +499,22 @@ def build_run_summary(
         "artifact_paths": artifact_paths,
         "notes": notes or [],
     }
+    if artifact_level is not None:
+        summary["artifact_level"] = artifact_level
+    if emit_baseline_compare is not None:
+        summary["emit_baseline_compare"] = emit_baseline_compare
+    if emit_delta_report is not None:
+        summary["emit_delta_report"] = emit_delta_report
     if tool_first_intervention_strategy is not None:
         summary["tool_first_intervention_strategy"] = tool_first_intervention_strategy
     if first_turn_protocol_gate_mode is not None:
         summary["first_turn_protocol_gate_mode"] = first_turn_protocol_gate_mode
     if post_pz_second_turn_gate_mode is not None:
         summary["post_pz_second_turn_gate_mode"] = post_pz_second_turn_gate_mode
+    if timing_enabled is not None:
+        summary["timing_enabled"] = timing_enabled
+    if progress_mode is not None:
+        summary["progress_mode"] = progress_mode
     if normalization_summary is not None:
         summary["normalization_summary"] = normalization_summary
     if prompt_audit_summary is not None:
@@ -496,6 +531,12 @@ def build_run_summary(
         summary["post_pz_transition_sanitation_summary"] = post_pz_transition_sanitation_summary
     if post_pz_second_turn_gate_summary is not None:
         summary["post_pz_second_turn_gate_summary"] = post_pz_second_turn_gate_summary
+    if timing_summary is not None:
+        summary["timing_summary"] = timing_summary
+    if core_artifacts_written_before_optional_tail_work is not None:
+        summary["core_artifacts_written_before_optional_tail_work"] = (
+            core_artifacts_written_before_optional_tail_work
+        )
     validate_payload(summary, "baseline_run_summary.schema.json")
     return summary
 

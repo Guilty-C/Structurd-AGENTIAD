@@ -58,6 +58,17 @@
       "type": "string",
       "enum": ["off", "retry_once_require_cr_after_pz"]
     },
+    "artifact_level": {
+      "type": "string",
+      "enum": ["forensic", "throughput"]
+    },
+    "emit_baseline_compare": { "type": "boolean" },
+    "emit_delta_report": { "type": "boolean" },
+    "timing_enabled": { "type": "boolean" },
+    "progress_mode": {
+      "type": "string",
+      "enum": ["off", "auto", "bar", "log"]
+    },
     "parser_validity": {
       "type": "object",
       "additionalProperties": false,
@@ -322,6 +333,12 @@
         "failed_count_with_missing_reason_count": { "type": "integer", "minimum": 0 }
       }
     },
+    "timing_summary": {
+      "$ref": "#/$defs/timingSummary"
+    },
+    "core_artifacts_written_before_optional_tail_work": {
+      "type": "boolean"
+    },
     "runtime_provenance": {
       "$ref": "#/$defs/runtimeProvenance"
     },
@@ -350,6 +367,7 @@
         "run_metadata": { "type": "string", "minLength": 1 },
         "run_manifest": { "type": "string", "minLength": 1 },
         "delta_report": { "type": "string" },
+        "progress_snapshot": { "type": "string", "minLength": 1 },
         "per_dataset_zero_tool_behavior": { "type": "string", "minLength": 1 },
         "per_category_zero_tool_behavior": { "type": "string", "minLength": 1 },
         "post_pz_transition_summary": { "type": "string", "minLength": 1 },
@@ -382,6 +400,45 @@
         "top_p": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
+    "timingSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "prompt_render_ms_total",
+        "request_build_or_processor_ms_total",
+        "generate_ms_total",
+        "tool_exec_ms_total",
+        "parse_validate_ms_total",
+        "file_write_ms_total",
+        "tail_compare_delta_ms_total",
+        "generation_call_count_total",
+        "retry_count_total",
+        "avg_generate_ms_per_sample"
+      ],
+      "properties": {
+        "prompt_render_ms_total": { "type": "number", "minimum": 0 },
+        "request_build_or_processor_ms_total": { "type": "number", "minimum": 0 },
+        "generate_ms_total": { "type": "number", "minimum": 0 },
+        "tool_exec_ms_total": { "type": "number", "minimum": 0 },
+        "parse_validate_ms_total": { "type": "number", "minimum": 0 },
+        "file_write_ms_total": { "type": "number", "minimum": 0 },
+        "tail_compare_delta_ms_total": { "type": "number", "minimum": 0 },
+        "generation_call_count_total": { "type": "integer", "minimum": 0 },
+        "retry_count_total": { "type": "integer", "minimum": 0 },
+        "avg_generate_ms_per_sample": { "type": "number", "minimum": 0 }
+      }
+    },
+    "generationOverrideSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "turn0_initial": { "$ref": "#/$defs/generationConfig" },
+        "turn0_retry": { "$ref": "#/$defs/generationConfig" },
+        "post_pz_second_turn": { "$ref": "#/$defs/generationConfig" },
+        "post_pz_second_turn_retry": { "$ref": "#/$defs/generationConfig" },
+        "final_answer": { "$ref": "#/$defs/generationConfig" }
+      }
+    },
     "runtimeProvenance": {
       "type": "object",
       "additionalProperties": false,
@@ -405,7 +462,15 @@
         "device",
         "tool_first_intervention_strategy",
         "first_turn_protocol_gate_mode",
-        "post_pz_second_turn_gate_mode"
+        "post_pz_second_turn_gate_mode",
+        "generation_stage_overrides",
+        "emit_baseline_compare",
+        "emit_delta_report",
+        "artifact_level",
+        "timing_enabled",
+        "progress_mode",
+        "progress_update_every_n_samples",
+        "progress_snapshot_path"
       ],
       "properties": {
         "runtime_backend_name": { "type": "string", "minLength": 1 },
@@ -429,6 +494,9 @@
         "generation_config": {
           "$ref": "#/$defs/generationConfig"
         },
+        "generation_stage_overrides": {
+          "$ref": "#/$defs/generationOverrideSet"
+        },
         "local_files_only": { "type": "boolean" },
         "trust_remote_code": { "type": "boolean" },
         "dtype": { "type": "string", "minLength": 1 },
@@ -444,6 +512,24 @@
         "post_pz_second_turn_gate_mode": {
           "type": "string",
           "enum": ["off", "retry_once_require_cr_after_pz"]
+        },
+        "emit_baseline_compare": { "type": "boolean" },
+        "emit_delta_report": { "type": "boolean" },
+        "artifact_level": {
+          "type": "string",
+          "enum": ["forensic", "throughput"]
+        },
+        "timing_enabled": { "type": "boolean" },
+        "progress_mode": {
+          "type": "string",
+          "enum": ["off", "auto", "bar", "log"]
+        },
+        "progress_update_every_n_samples": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "progress_snapshot_path": {
+          "type": ["string", "null"]
         }
       }
     }

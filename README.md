@@ -120,6 +120,7 @@ Prompt 2.0 keeps [src/agentiad_recon/baseline.py](/home/zbr/project/lrrelevant/S
 - Prompt 2.10 does not force CR use; it adds post-PZ second-turn transition audit sidecars plus run-level post-PZ transition summaries so the repo can distinguish a valid exposed CR contract from a degraded post-PZ prompt surface when the next assistant turn still skips CR
 - Prompt 2.11 does not force CR use; it sanitizes the active post-PZ second-turn runtime context by removing superseded first-turn assistant leakage from the gate-replaced terminal branch, while exporting pre/post sanitation prompt-surface evidence plus run-level sanitation summaries
 - Prompt 2.12 adds an opt-in bounded post-PZ second-turn CR protocol gate that retries exactly once after a cleaned valid CR contract still gets a direct final answer, while preserving both raw outputs and exporting explicit gate outcomes
+- Prompt 2.13 keeps the same unified evaluator but adds opt-in throughput and observability controls: stage-specific generation budgets via `generation_stage_overrides`, optional `emit_baseline_compare` and `emit_delta_report` tail skips, `artifact_level=throughput` sparse sidecar retention, optional run-level `timing_summary`, and `progress_mode` plus snapshot reporting for long runs; defaults preserve prior forensic behavior and this is a speed/monitoring surface rather than a scientific-target change
 
 ## Trajectory Reconstruction For SFT
 

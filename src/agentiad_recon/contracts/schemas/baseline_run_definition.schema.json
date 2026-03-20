@@ -170,6 +170,46 @@
           "type": "string",
           "enum": ["off", "retry_once_pz_cr"]
         },
+        "post_pz_second_turn_gate_mode": {
+          "type": "string",
+          "enum": ["off", "retry_once_require_cr_after_pz"]
+        },
+        "generation_stage_overrides": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "turn0_initial": { "$ref": "#/$defs/generationOverride" },
+            "turn0_retry": { "$ref": "#/$defs/generationOverride" },
+            "post_pz_second_turn": { "$ref": "#/$defs/generationOverride" },
+            "post_pz_second_turn_retry": { "$ref": "#/$defs/generationOverride" },
+            "final_answer": { "$ref": "#/$defs/generationOverride" }
+          }
+        },
+        "emit_baseline_compare": {
+          "type": "boolean"
+        },
+        "emit_delta_report": {
+          "type": "boolean"
+        },
+        "artifact_level": {
+          "type": "string",
+          "enum": ["forensic", "throughput"]
+        },
+        "timing_enabled": {
+          "type": "boolean"
+        },
+        "progress_mode": {
+          "type": "string",
+          "enum": ["off", "auto", "bar", "log"]
+        },
+        "progress_update_every_n_samples": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "progress_snapshot_path": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
         "generation": {
           "type": "object",
           "additionalProperties": false,
@@ -191,6 +231,28 @@
               "maximum": 1
             }
           }
+        }
+      }
+    },
+    "generationOverride": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_new_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "do_sample": {
+          "type": "boolean"
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0
+        },
+        "top_p": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
         }
       }
     }

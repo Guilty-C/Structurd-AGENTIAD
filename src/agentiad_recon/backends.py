@@ -36,6 +36,7 @@ class BackendRequest:
     messages: list[dict[str, Any]]
     stop_sequences: list[str]
     tool_mode: str = "no_tools"
+    generation_config: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -90,6 +91,19 @@ def _normalize_runtime_config(runtime_config: dict[str, Any] | None) -> dict[str
     config.setdefault("dtype", "auto")
     config.setdefault("device", "auto")
     return config
+
+
+def _effective_generation_config(
+    runtime_config: dict[str, Any],
+    request: BackendRequest,
+) -> dict[str, Any]:
+    """Resolve per-request generation config with runtime defaults as fallback."""
+
+    if request.generation_config is None:
+        return dict(runtime_config["generation"])
+    merged = dict(runtime_config["generation"])
+    merged.update(request.generation_config)
+    return merged
 
 
 class MockInferenceBackend(InferenceBackend):
@@ -365,6 +379,7 @@ class VLLMBackendAdapter(InferenceBackend):
             "messages": request.messages,
             "stop": request.stop_sequences,
             "seed": request.seed,
+            "generation_config": _effective_generation_config(self.runtime_config, request),
             "metadata": request.metadata,
         }
 
@@ -751,7 +766,9 @@ class TransformersVisionLanguageBackend(InferenceBackend):
         try:
             model_device = self._infer_model_device(self._model)
             encoded_inputs = self._move_batch_to_device(encoded_inputs, model_device)
-            generation_config = self._sanitize_generation_kwargs(self.runtime_config["generation"])
+            generation_config = self._sanitize_generation_kwargs(
+                _effective_generation_config(self.runtime_config, request)
+            )
             output_ids = self._model.generate(**encoded_inputs, **generation_config)
             prompt_length = encoded_inputs["input_ids"].shape[-1]
             generated_ids = output_ids[:, prompt_length:]
@@ -777,6 +794,6 @@ class TransformersVisionLanguageBackend(InferenceBackend):
                 "base_model_path": self.runtime_config["base_model_path"],
                 "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
                 "adapter_loaded": self._adapter_loaded,
-                "generation_config": dict(self.runtime_config["generation"]),
+                "generation_config": dict(generation_config),
             },
         )

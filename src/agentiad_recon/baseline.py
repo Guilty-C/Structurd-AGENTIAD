@@ -13,6 +13,8 @@ import argparse
 import hashlib
 import json
 import re
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -76,6 +78,15 @@ from agentiad_recon.traces import TraceMessage, TraceRecord
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIRST_TURN_PROTOCOL_GATE_MODES = ("off", "retry_once_pz_cr")
 POST_PZ_SECOND_TURN_GATE_MODES = ("off", "retry_once_require_cr_after_pz")
+ARTIFACT_LEVELS = ("forensic", "throughput")
+PROGRESS_MODES = ("off", "auto", "bar", "log")
+GENERATION_OVERRIDE_STAGES = (
+    "turn0_initial",
+    "turn0_retry",
+    "post_pz_second_turn",
+    "post_pz_second_turn_retry",
+    "final_answer",
+)
 
 
 class InferenceRunError(RuntimeError):
@@ -141,9 +152,264 @@ def _runtime_defaults() -> dict[str, Any]:
             "temperature": 0.0,
             "top_p": 1.0,
         },
+        "generation_stage_overrides": {},
         "tool_first_intervention_strategy": "baseline",
         "first_turn_protocol_gate_mode": "off",
         "post_pz_second_turn_gate_mode": "off",
+        "emit_baseline_compare": True,
+        "emit_delta_report": True,
+        "artifact_level": "forensic",
+        "timing_enabled": False,
+        "progress_mode": "off",
+        "progress_update_every_n_samples": 1,
+        "progress_snapshot_path": None,
+    }
+
+
+def _normalize_generation_stage_overrides(overrides: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Validate and normalize stage-specific generation overrides."""
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for stage, values in dict(overrides or {}).items():
+        if stage not in GENERATION_OVERRIDE_STAGES:
+            raise InferenceRunError(f"Unsupported generation override stage: {stage!r}")
+        if not isinstance(values, dict):
+            raise InferenceRunError(f"Generation override for stage {stage!r} must be an object")
+        normalized[stage] = {
+            key: value
+            for key, value in values.items()
+            if key in {"max_new_tokens", "do_sample", "temperature", "top_p"} and value is not None
+        }
+    return normalized
+
+
+def _generation_config_for_stage(runtime_config: dict[str, Any], stage: str) -> dict[str, Any]:
+    """Resolve one generation config for a specific runtime stage."""
+
+    config = dict(runtime_config["generation"])
+    config.update(runtime_config["generation_stage_overrides"].get(stage, {}))
+    return config
+
+
+def _new_timing_counters() -> dict[str, float | int]:
+    """Return one zero-initialized per-sample timing bucket payload."""
+
+    return {
+        "prompt_render_ms": 0.0,
+        "request_build_or_processor_ms": 0.0,
+        "generate_ms": 0.0,
+        "tool_exec_ms": 0.0,
+        "parse_validate_ms": 0.0,
+        "file_write_ms": 0.0,
+        "tail_compare_delta_ms": 0.0,
+        "generation_call_count": 0,
+        "retry_count": 0,
+    }
+
+
+def _elapsed_ms(start_time: float) -> float:
+    """Convert one perf-counter start point into elapsed milliseconds."""
+
+    return (time.perf_counter() - start_time) * 1000.0
+
+
+def _sha256_text(value: str) -> str:
+    """Hash one UTF-8 text payload without requiring file retention."""
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _utc_now_iso() -> str:
+    """Return one deterministic UTC timestamp string."""
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+class ProgressReporter:
+    """Small progress helper for interactive and redirected unified eval runs."""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        total_samples: int,
+        mode: str,
+        update_every_n_samples: int,
+        snapshot_path: Path | None,
+    ) -> None:
+        self.run_id = run_id
+        self.total_samples = max(total_samples, 0)
+        self.mode = mode
+        self.update_every_n_samples = max(update_every_n_samples, 1)
+        self.snapshot_path = snapshot_path
+        self.start_time = time.perf_counter()
+        self.last_emitted_processed = 0
+        self._bar_active = False
+        self._resolved_mode = self._resolve_mode()
+
+    def _resolve_mode(self) -> str:
+        if self.mode == "off":
+            return "off"
+        if self.mode == "log":
+            return "log"
+        if self.mode == "bar":
+            return "bar"
+        return "bar" if getattr(sys.stderr, "isatty", lambda: False)() else "log"
+
+    def _snapshot_payload(
+        self,
+        *,
+        processed_samples: int,
+        current_sample_id: str | None,
+        timing_summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        elapsed_seconds = max(time.perf_counter() - self.start_time, 0.0)
+        avg_seconds_per_sample = (
+            elapsed_seconds / processed_samples if processed_samples > 0 else 0.0
+        )
+        remaining = max(self.total_samples - processed_samples, 0)
+        eta_seconds = avg_seconds_per_sample * remaining if processed_samples > 0 else None
+        percent_complete = (
+            (processed_samples / self.total_samples) * 100.0 if self.total_samples > 0 else 100.0
+        )
+        return {
+            "run_id": self.run_id,
+            "processed_samples": processed_samples,
+            "total_samples": self.total_samples,
+            "percent_complete": percent_complete,
+            "elapsed_seconds": elapsed_seconds,
+            "avg_seconds_per_sample": avg_seconds_per_sample,
+            "eta_seconds": eta_seconds,
+            "current_sample_id": current_sample_id,
+            "generation_call_count_total": timing_summary["generation_call_count_total"],
+            "retry_count_total": timing_summary["retry_count_total"],
+            "last_update_utc": _utc_now_iso(),
+        }
+
+    def _write_snapshot(
+        self,
+        *,
+        processed_samples: int,
+        current_sample_id: str | None,
+        timing_summary: dict[str, Any],
+    ) -> None:
+        if self.snapshot_path is None:
+            return
+        write_json(
+            self.snapshot_path,
+            self._snapshot_payload(
+                processed_samples=processed_samples,
+                current_sample_id=current_sample_id,
+                timing_summary=timing_summary,
+            ),
+        )
+
+    def update(
+        self,
+        *,
+        processed_samples: int,
+        current_sample_id: str | None,
+        timing_summary: dict[str, Any],
+        force: bool = False,
+    ) -> None:
+        if self._resolved_mode == "off":
+            return
+        if (
+            not force
+            and processed_samples < self.total_samples
+            and processed_samples - self.last_emitted_processed < self.update_every_n_samples
+        ):
+            return
+
+        snapshot = self._snapshot_payload(
+            processed_samples=processed_samples,
+            current_sample_id=current_sample_id,
+            timing_summary=timing_summary,
+        )
+        self._write_snapshot(
+            processed_samples=processed_samples,
+            current_sample_id=current_sample_id,
+            timing_summary=timing_summary,
+        )
+
+        elapsed_seconds = snapshot["elapsed_seconds"]
+        eta_seconds = snapshot["eta_seconds"]
+        avg_seconds_per_sample = snapshot["avg_seconds_per_sample"]
+        current = current_sample_id or "-"
+        if self._resolved_mode == "bar":
+            bar_width = 24
+            filled = (
+                int((processed_samples / self.total_samples) * bar_width)
+                if self.total_samples > 0
+                else bar_width
+            )
+            bar = "#" * filled + "-" * max(bar_width - filled, 0)
+            line = (
+                f"\r[{bar}] {processed_samples}/{self.total_samples} "
+                f"({snapshot['percent_complete']:.1f}%) elapsed={elapsed_seconds:.1f}s "
+                f"avg={avg_seconds_per_sample:.2f}s/sample eta={eta_seconds or 0.0:.1f}s "
+                f"sample={current}"
+            )
+            sys.stderr.write(line)
+            sys.stderr.flush()
+            self._bar_active = True
+            if processed_samples >= self.total_samples:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+                self._bar_active = False
+        else:
+            sys.stderr.write(
+                "[progress] "
+                f"processed={processed_samples}/{self.total_samples} "
+                f"percent={snapshot['percent_complete']:.1f} "
+                f"elapsed_s={elapsed_seconds:.1f} "
+                f"avg_s_per_sample={avg_seconds_per_sample:.2f} "
+                f"eta_s={(eta_seconds or 0.0):.1f} "
+                f"sample_id={current}\n"
+            )
+            sys.stderr.flush()
+
+        self.last_emitted_processed = processed_samples
+
+
+def _timing_summary_from_prediction_records(
+    prediction_records: list[dict[str, Any]],
+    *,
+    tail_compare_delta_ms_total: float = 0.0,
+) -> dict[str, Any]:
+    """Aggregate per-sample timing metadata into one run-level timing summary."""
+
+    totals = _new_timing_counters()
+    for record in prediction_records:
+        timing = record.get("metadata", {}).get("timing", {})
+        for key in (
+            "prompt_render_ms",
+            "request_build_or_processor_ms",
+            "generate_ms",
+            "tool_exec_ms",
+            "parse_validate_ms",
+            "file_write_ms",
+            "tail_compare_delta_ms",
+        ):
+            totals[key] += float(timing.get(key, 0.0))
+        for key in ("generation_call_count", "retry_count"):
+            totals[key] += int(timing.get(key, 0))
+
+    totals["tail_compare_delta_ms"] += tail_compare_delta_ms_total
+    sample_count = len(prediction_records)
+    return {
+        "prompt_render_ms_total": totals["prompt_render_ms"],
+        "request_build_or_processor_ms_total": totals["request_build_or_processor_ms"],
+        "generate_ms_total": totals["generate_ms"],
+        "tool_exec_ms_total": totals["tool_exec_ms"],
+        "parse_validate_ms_total": totals["parse_validate_ms"],
+        "file_write_ms_total": totals["file_write_ms"],
+        "tail_compare_delta_ms_total": totals["tail_compare_delta_ms"],
+        "generation_call_count_total": totals["generation_call_count"],
+        "retry_count_total": totals["retry_count"],
+        "avg_generate_ms_per_sample": (
+            totals["generate_ms"] / sample_count if sample_count > 0 else 0.0
+        ),
     }
 
 
@@ -160,6 +426,9 @@ def _runtime_config(
     generation_overrides = dict(runtime_overrides.get("generation", {})) if runtime_overrides else {}
     config["generation"] = dict(config["generation"])
     config["generation"].update(generation_overrides)
+    config["generation_stage_overrides"] = _normalize_generation_stage_overrides(
+        config.get("generation_stage_overrides")
+    )
 
     for key in (
         "base_model_path",
@@ -173,9 +442,20 @@ def _runtime_config(
         "tool_first_intervention_strategy",
         "first_turn_protocol_gate_mode",
         "post_pz_second_turn_gate_mode",
+        "emit_baseline_compare",
+        "emit_delta_report",
+        "artifact_level",
+        "timing_enabled",
+        "progress_mode",
+        "progress_update_every_n_samples",
+        "progress_snapshot_path",
     ):
         if runtime_overrides and key in runtime_overrides and runtime_overrides[key] is not None:
             config[key] = runtime_overrides[key]
+    if runtime_overrides and runtime_overrides.get("generation_stage_overrides") is not None:
+        config["generation_stage_overrides"] = _normalize_generation_stage_overrides(
+            runtime_overrides["generation_stage_overrides"]
+        )
 
     inferred = _infer_checkpoint_provenance(config["adapter_checkpoint_path"])
     if config["checkpoint_step"] is None:
@@ -197,6 +477,12 @@ def _runtime_config(
             "Unsupported post_pz_second_turn_gate_mode: "
             f"{config['post_pz_second_turn_gate_mode']!r}"
         )
+    if config["artifact_level"] not in ARTIFACT_LEVELS:
+        raise InferenceRunError(f"Unsupported artifact_level: {config['artifact_level']!r}")
+    if config["progress_mode"] not in PROGRESS_MODES:
+        raise InferenceRunError(f"Unsupported progress_mode: {config['progress_mode']!r}")
+    if int(config["progress_update_every_n_samples"]) < 1:
+        raise InferenceRunError("progress_update_every_n_samples must be >= 1")
 
     resolved_dataset_root = _resolve_path(dataset_root or definition["sample_source"]["path"])
     config["dataset_root"] = str(resolved_dataset_root)
@@ -205,6 +491,8 @@ def _runtime_config(
     config["runtime_backend_name"] = definition["backend"]["name"]
     config["runtime_backend_type"] = definition["backend"]["type"]
     config["runtime_owner"] = definition["backend"]["runtime_owner"]
+    if config["progress_snapshot_path"] is not None:
+        config["progress_snapshot_path"] = str(_resolve_path(config["progress_snapshot_path"]))
     return config
 
 
@@ -230,6 +518,7 @@ def _resolved_runtime_provenance(
         "tool_mode": runtime_config["tool_mode"],
         "inference_mode": runtime_config["inference_mode"],
         "generation_config": dict(runtime_config["generation"]),
+        "generation_stage_overrides": runtime_config["generation_stage_overrides"],
         "local_files_only": runtime_config["local_files_only"],
         "trust_remote_code": runtime_config["trust_remote_code"],
         "dtype": runtime_config["dtype"],
@@ -237,6 +526,13 @@ def _resolved_runtime_provenance(
         "tool_first_intervention_strategy": runtime_config["tool_first_intervention_strategy"],
         "first_turn_protocol_gate_mode": runtime_config["first_turn_protocol_gate_mode"],
         "post_pz_second_turn_gate_mode": runtime_config["post_pz_second_turn_gate_mode"],
+        "emit_baseline_compare": runtime_config["emit_baseline_compare"],
+        "emit_delta_report": runtime_config["emit_delta_report"],
+        "artifact_level": runtime_config["artifact_level"],
+        "timing_enabled": runtime_config["timing_enabled"],
+        "progress_mode": runtime_config["progress_mode"],
+        "progress_update_every_n_samples": runtime_config["progress_update_every_n_samples"],
+        "progress_snapshot_path": runtime_config["progress_snapshot_path"],
     }
 
 
@@ -298,6 +594,51 @@ def _write_text(path: str | Path, payload: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(payload, encoding="utf-8")
+
+
+def _parse_bool_flag(value: str) -> bool:
+    """Parse one explicit CLI boolean flag value."""
+
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value, got: {value!r}")
+
+
+def _default_progress_snapshot_path(root: Path) -> Path:
+    """Return the default progress snapshot path for one run root."""
+
+    return root / "progress" / "progress_snapshot.json"
+
+
+def _should_write_sample_artifacts(
+    *,
+    artifact_level: str,
+    failure_reason: str | None,
+    first_turn_gate_triggered: bool,
+    first_turn_gate_outcome: str,
+    first_turn_gate_repair_attempted: bool,
+    first_turn_gate_repair_succeeded: bool,
+    post_pz_second_turn_gate_triggered: bool,
+    post_pz_second_turn_gate_outcome: str,
+) -> bool:
+    """Return whether optional per-sample raw outputs and sidecars should be retained."""
+
+    if artifact_level == "forensic":
+        return True
+    if failure_reason:
+        return True
+    if first_turn_gate_triggered or post_pz_second_turn_gate_triggered:
+        return True
+    if first_turn_gate_outcome == "recovered_to_tool_call":
+        return True
+    if post_pz_second_turn_gate_outcome == "recovered_to_cr_call":
+        return True
+    if first_turn_gate_repair_attempted or first_turn_gate_repair_succeeded:
+        return True
+    return False
 
 
 def _prompt_history(prompt_bundle: Any) -> list[dict[str, Any]]:
@@ -1305,13 +1646,35 @@ def run_baseline(
     samples = _load_samples(definition, dataset_root=dataset_root, max_samples=max_samples)
     root = _resolve_path(artifact_root or definition["artifacts"]["root"])
     directories = _artifact_dirs(definition, root)
+    progress_snapshot_path = None
+    if runtime_config["progress_mode"] != "off":
+        progress_snapshot_path = Path(
+            runtime_config["progress_snapshot_path"] or _default_progress_snapshot_path(root)
+        ).resolve()
+        runtime_config["progress_snapshot_path"] = str(progress_snapshot_path)
+    progress_reporter = ProgressReporter(
+        run_id=definition["run_id"],
+        total_samples=len(definition["seeds"]) * len(samples),
+        mode=runtime_config["progress_mode"],
+        update_every_n_samples=runtime_config["progress_update_every_n_samples"],
+        snapshot_path=progress_snapshot_path,
+    )
+    processed_samples = 0
+    progress_counts = {
+        "generation_call_count_total": 0,
+        "retry_count_total": 0,
+    }
 
     prediction_records: list[dict[str, Any]] = []
     for seed in definition["seeds"]:
         seed_records: list[dict[str, Any]] = []
         for sample in samples:
+            sample_timing = _new_timing_counters()
+            prompt_stage_start = time.perf_counter()
             prompt_bundle = build_baseline_prompt(sample)
+            sample_timing["prompt_render_ms"] += _elapsed_ms(prompt_stage_start)
             history = _prompt_history(prompt_bundle)
+            request_stage_start = time.perf_counter()
             request = BackendRequest(
                 sample_id=sample["sample_id"],
                 seed=seed,
@@ -1319,16 +1682,22 @@ def run_baseline(
                 messages=history,
                 stop_sequences=prompt_bundle.stop_sequences,
                 tool_mode="no_tools",
+                generation_config=_generation_config_for_stage(runtime_config, "final_answer"),
                 metadata={
                     "tool_mode": "no_tools",
+                    "generation_stage": "final_answer",
                     "sample_kind": sample["metadata"].get("dataset_kind", "unknown"),
                 },
             )
+            sample_timing["request_build_or_processor_ms"] += _elapsed_ms(request_stage_start)
+            generate_stage_start = time.perf_counter()
             response = backend.generate(request, sample=sample)
+            sample_timing["generate_ms"] += _elapsed_ms(generate_stage_start)
+            sample_timing["generation_call_count"] += 1
 
             sample_slug = safe_slug(sample["sample_id"])
             raw_output_path = _raw_output_path(directories["raw_outputs"], seed=seed, sample_slug=sample_slug, turn_index=0)
-            _write_text(raw_output_path, response.raw_output)
+            raw_output_text = response.raw_output
 
             prediction: dict[str, Any] | None = None
             parser_valid = False
@@ -1340,13 +1709,16 @@ def run_baseline(
             terminal_answer_turn_index: int | None = None
             _append_reasoning(history, response.raw_output, backend_name=response.backend_name)
             try:
+                parse_stage_start = time.perf_counter()
                 prediction = parse_final_answer(response.raw_output)
+                sample_timing["parse_validate_ms"] += _elapsed_ms(parse_stage_start)
                 parser_valid = True
                 schema_valid = True
                 first_protocol_event_type = "final_answer"
                 terminal_answer_present = True
                 terminal_answer_turn_index = 0
             except Exception as exc:  # noqa: BLE001 - gate needs explicit failures.
+                sample_timing["parse_validate_ms"] += _elapsed_ms(parse_stage_start)
                 error_message = str(exc)
                 failure_reason = _failure_reason("parser_invalid", str(exc))
                 if "<answer>" in response.raw_output or "<final_answer>" in response.raw_output:
@@ -1362,6 +1734,13 @@ def run_baseline(
                 failure_reason=failure_reason,
                 error_message=error_message,
             )
+            keep_optional_artifacts = (
+                runtime_config["artifact_level"] == "forensic" or bool(failure_reason)
+            )
+            if keep_optional_artifacts:
+                write_stage_start = time.perf_counter()
+                _write_text(raw_output_path, raw_output_text)
+                sample_timing["file_write_ms"] += _elapsed_ms(write_stage_start)
             _append_final_answer_message(
                 history,
                 response.raw_output,
@@ -1387,7 +1766,9 @@ def run_baseline(
             )
             trace_payload = trace.to_audit_payload()
             trace_path = directories["traces"] / f"seed_{seed}" / f"{sample_slug}.json"
+            write_stage_start = time.perf_counter()
             write_json(trace_path, trace_payload)
+            sample_timing["file_write_ms"] += _elapsed_ms(write_stage_start)
 
             record = build_prediction_record(
                 run_id=definition["run_id"],
@@ -1404,7 +1785,7 @@ def run_baseline(
                 error_message=error_message,
                 failure_reason=failure_reason,
                 raw_output_path=str(raw_output_path.resolve()),
-                raw_output_sha256=sha256_file(raw_output_path),
+                raw_output_sha256=_sha256_text(raw_output_text),
                 trace_path=str(trace_path.resolve()),
                 first_turn_protocol_gate_mode="off",
                 post_pz_second_turn_gate_mode="off",
@@ -1453,6 +1834,7 @@ def run_baseline(
                 metadata={
                     "backend_metadata": response.metadata,
                     "sample_source_kind": sample["metadata"].get("dataset_kind"),
+                    "timing": dict(sample_timing),
                     "runtime_provenance": _resolved_runtime_provenance(
                         definition,
                         runtime_config,
@@ -1468,13 +1850,40 @@ def run_baseline(
                 ),
             )
             prediction_path = directories["predictions"] / f"seed_{seed}" / f"{sample_slug}.json"
+            write_stage_start = time.perf_counter()
             write_json(prediction_path, record)
+            sample_timing["file_write_ms"] += _elapsed_ms(write_stage_start)
+            record["metadata"]["timing"] = dict(sample_timing)
             seed_records.append(record)
             prediction_records.append(record)
+            processed_samples += 1
+            progress_counts["generation_call_count_total"] += int(sample_timing["generation_call_count"])
+            progress_counts["retry_count_total"] += int(sample_timing["retry_count"])
+            progress_reporter.update(
+                processed_samples=processed_samples,
+                current_sample_id=sample["sample_id"],
+                timing_summary=progress_counts,
+            )
 
+        write_stage_start = time.perf_counter()
         write_jsonl(directories["predictions"] / f"seed_{seed}.jsonl", seed_records)
+        write_elapsed_ms = _elapsed_ms(write_stage_start)
+        for record in seed_records:
+            record["metadata"]["timing"]["file_write_ms"] += write_elapsed_ms / max(len(seed_records), 1)
+
+    progress_reporter.update(
+        processed_samples=processed_samples,
+        current_sample_id=None,
+        timing_summary=progress_counts,
+        force=True,
+    )
 
     runtime_provenance = _resolved_runtime_provenance(definition, runtime_config, backend)
+    timing_summary = (
+        _timing_summary_from_prediction_records(prediction_records)
+        if runtime_config["timing_enabled"]
+        else None
+    )
     metrics_report = build_metrics_report(
         run_id=definition["run_id"],
         tool_mode="no_tools",
@@ -1484,6 +1893,12 @@ def run_baseline(
         prediction_records=prediction_records,
         seeds=definition["seeds"],
         runtime_provenance=runtime_provenance,
+        artifact_level=runtime_provenance["artifact_level"],
+        emit_baseline_compare=runtime_provenance["emit_baseline_compare"],
+        emit_delta_report=runtime_provenance["emit_delta_report"],
+        timing_enabled=runtime_provenance["timing_enabled"],
+        progress_mode=runtime_provenance["progress_mode"],
+        timing_summary=timing_summary,
     )
     metrics_report_path = directories["metrics"] / "metrics_report.json"
     per_seed_metrics_path = directories["metrics"] / "per_seed_metrics.json"
@@ -1519,6 +1934,11 @@ def run_baseline(
         seeds=definition["seeds"],
         prediction_records=prediction_records,
         runtime_provenance=runtime_provenance,
+        artifact_level=runtime_provenance["artifact_level"],
+        emit_baseline_compare=runtime_provenance["emit_baseline_compare"],
+        emit_delta_report=runtime_provenance["emit_delta_report"],
+        timing_enabled=runtime_provenance["timing_enabled"],
+        progress_mode=runtime_provenance["progress_mode"],
         artifact_paths={
             "predictions_dir": str(directories["predictions"].resolve()),
             "traces_dir": str(directories["traces"].resolve()),
@@ -1529,8 +1949,14 @@ def run_baseline(
             "aggregate_metrics": str(aggregate_metrics_path.resolve()),
             "run_metadata": str(run_metadata_path.resolve()),
             "run_manifest": str((directories["root"] / "run_manifest.json").resolve()),
+            **(
+                {"progress_snapshot": str(progress_snapshot_path)}
+                if progress_snapshot_path is not None
+                else {}
+            ),
         },
         notes=definition.get("notes", []),
+        timing_summary=timing_summary,
     )
     summary_path = directories["root"] / "run_summary.json"
     write_json(summary_path, summary)
@@ -1547,7 +1973,13 @@ def run_baseline(
             "run_metadata": sha256_file(run_metadata_path),
         },
         "execution_boundary": definition["execution_boundary"],
+        "artifact_level": runtime_provenance["artifact_level"],
+        "emit_baseline_compare": runtime_provenance["emit_baseline_compare"],
+        "emit_delta_report": runtime_provenance["emit_delta_report"],
+        "timing_enabled": runtime_provenance["timing_enabled"],
+        "progress_mode": runtime_provenance["progress_mode"],
         "run_provenance": runtime_provenance,
+        **({"timing_summary": timing_summary} if timing_summary is not None else {}),
         "notes": [
             "Non-tool baseline summary manifest.",
             (
@@ -1595,13 +2027,19 @@ def _tool_loop_sample(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Execute the bounded tool loop for one sample and return its artifacts."""
 
+    sample_timing = _new_timing_counters()
+    prompt_stage_start = time.perf_counter()
     prompt_bundle = build_prompt(
         sample,
         tool_path=definition["mode"],
         tool_first_intervention_strategy=runtime_config["tool_first_intervention_strategy"],
     )
+    sample_timing["prompt_render_ms"] += _elapsed_ms(prompt_stage_start)
     history = _prompt_history(prompt_bundle)
     sample_slug = safe_slug(sample["sample_id"])
+    artifact_level = runtime_config["artifact_level"]
+    pending_text_artifacts: dict[Path, str] = {}
+    pending_json_artifacts: dict[Path, dict[str, Any]] = {}
     tool_traces: list[dict[str, Any]] = []
     prediction: dict[str, Any] | None = None
     parser_valid = False
@@ -1609,6 +2047,7 @@ def _tool_loop_sample(
     error_message: str | None = None
     failure_reason: str | None = None
     last_raw_output_path: Path | None = None
+    last_raw_output_text: str | None = None
     normalization_events: list[dict[str, Any]] = []
     normalization_event_paths: list[str] = []
     first_protocol_event_type = "unknown"
@@ -1660,6 +2099,30 @@ def _tool_loop_sample(
     post_pz_second_turn_gate_retry_failure_reason: str | None = None
     post_pz_second_turn_gate_retry_raw_output_path: Path | None = None
     post_pz_second_turn_gate_sidecar_path: Path | None = None
+
+    def _write_required_text(path: Path, payload: str) -> None:
+        start_time = time.perf_counter()
+        _write_text(path, payload)
+        sample_timing["file_write_ms"] += _elapsed_ms(start_time)
+
+    def _write_required_json(path: Path, payload: dict[str, Any]) -> None:
+        start_time = time.perf_counter()
+        write_json(path, payload)
+        sample_timing["file_write_ms"] += _elapsed_ms(start_time)
+
+    def _queue_optional_text(path: Path, payload: str) -> None:
+        pending_text_artifacts[path] = payload
+
+    def _queue_optional_json(path: Path, payload: dict[str, Any]) -> None:
+        pending_json_artifacts[path] = payload
+
+    def _flush_optional_sample_artifacts(keep_artifacts: bool) -> None:
+        if not keep_artifacts:
+            return
+        for path, payload in pending_text_artifacts.items():
+            _write_required_text(path, payload)
+        for path, payload in pending_json_artifacts.items():
+            _write_required_json(path, payload)
     prompt_audit_path = _prompt_audit_sidecar_path(directories["raw_outputs"], seed=seed, sample_slug=sample_slug)
     prompt_audit = _prompt_audit_payload(
         prompt_bundle,
@@ -1669,7 +2132,7 @@ def _tool_loop_sample(
         runtime_tool_mode=definition["mode"],
         tool_first_intervention_strategy=runtime_config["tool_first_intervention_strategy"],
     )
-    write_json(prompt_audit_path, prompt_audit)
+    _queue_optional_json(prompt_audit_path, prompt_audit)
 
     if prompt_audit["mode_contract_mismatch"]:
         failure_reason = prompt_audit["mismatch_reasons"][0]
@@ -1684,10 +2147,8 @@ def _tool_loop_sample(
             sample_slug=sample_slug,
             turn_index=0,
         )
-        _write_text(
-            last_raw_output_path,
-            f"NO_GENERATION: {error_message}",
-        )
+        last_raw_output_text = f"NO_GENERATION: {error_message}"
+        _queue_optional_text(last_raw_output_path, last_raw_output_text)
         _append_final_answer_message(
             history,
             f"NO_GENERATION: {error_message}",
@@ -1705,10 +2166,13 @@ def _tool_loop_sample(
         """Persist one raw output and return the normalized protocol decision."""
 
         nonlocal last_raw_output_path
+        nonlocal last_raw_output_text
         nonlocal first_protocol_event_type
-        _write_text(raw_output_path, response.raw_output)
         last_raw_output_path = raw_output_path
+        last_raw_output_text = response.raw_output
+        _queue_optional_text(raw_output_path, response.raw_output)
         _append_reasoning(history, response.raw_output, backend_name=response.backend_name)
+        parse_stage_start = time.perf_counter()
         decision = normalize_protocol_turn(response.raw_output, tool_path=definition["mode"])
         event = decision.event_type
         if turn_index == 0 and first_protocol_event_type == "unknown":
@@ -1726,7 +2190,7 @@ def _tool_loop_sample(
                 turn_index=turn_index,
                 raw_output_path=str(raw_output_path.resolve()),
             )
-            write_json(sidecar_path, audit_payload)
+            _queue_optional_json(sidecar_path, audit_payload)
             normalization_events.append(audit_payload)
             normalization_event_paths.append(str(sidecar_path.resolve()))
             normalization_metadata = {
@@ -1741,6 +2205,7 @@ def _tool_loop_sample(
                 ],
                 "normalization_sidecar_path": str(sidecar_path.resolve()),
             }
+        sample_timing["parse_validate_ms"] += _elapsed_ms(parse_stage_start)
         return decision, event, normalization_metadata
 
     def _mark_first_successful_tool(*, tool_name: str, turn_index: int) -> None:
@@ -1751,6 +2216,24 @@ def _tool_loop_sample(
         if first_successful_tool_name is None:
             first_successful_tool_name = tool_name
             first_successful_tool_turn_index = turn_index
+
+    def _timed_parse_final_answer(raw_output: str) -> dict[str, Any]:
+        """Parse one final answer while accumulating timing."""
+
+        parse_stage_start = time.perf_counter()
+        try:
+            return parse_final_answer(raw_output)
+        finally:
+            sample_timing["parse_validate_ms"] += _elapsed_ms(parse_stage_start)
+
+    def _timed_parse_tool_call(raw_output: str) -> Any:
+        """Parse one tool call while accumulating timing."""
+
+        parse_stage_start = time.perf_counter()
+        try:
+            return parse_tool_call(raw_output, tool_path=definition["mode"])
+        finally:
+            sample_timing["parse_validate_ms"] += _elapsed_ms(parse_stage_start)
 
     def _start_post_pz_transition_audit(*, turn_index: int) -> None:
         """Sanitize and snapshot the first assistant turn shown after PZ reinsertion."""
@@ -1879,7 +2362,7 @@ def _tool_loop_sample(
         post_pz_transition_sidecar["second_turn_parser_valid"] = second_turn_parser_valid_value
         post_pz_transition_sidecar["second_turn_schema_valid"] = second_turn_schema_valid_value
         post_pz_transition_sidecar["second_turn_failure_reason"] = second_turn_failure_reason_value
-        write_json(post_pz_transition_sidecar_path, post_pz_transition_sidecar)
+        _queue_optional_json(post_pz_transition_sidecar_path, post_pz_transition_sidecar)
 
     def _write_post_pz_second_turn_gate_sidecar(
         *,
@@ -1902,7 +2385,7 @@ def _tool_loop_sample(
             sample_slug=sample_slug,
             turn_index=turn_index,
         )
-        write_json(
+        _queue_optional_json(
             post_pz_second_turn_gate_sidecar_path,
             {
                 "sample_id": sample["sample_id"],
@@ -1935,10 +2418,27 @@ def _tool_loop_sample(
             },
         )
 
+    def _normal_generation_stage(turn_index: int) -> str:
+        """Resolve the stage label for one normal tool-loop generation call."""
+
+        if turn_index == 0 and not tool_traces:
+            return "turn0_initial"
+        if (
+            definition["mode"] == "pz_cr"
+            and first_successful_tool_name == "PZ"
+            and post_pz_transition_audited
+            and post_pz_transition_sidecar is not None
+            and post_pz_transition_sidecar["post_pz_assistant_turn_index"] == turn_index
+        ):
+            return "post_pz_second_turn"
+        return "final_answer"
+
     for turn_index in range(definition["max_tool_turns"] + 1):
         if prompt_audit["mode_contract_mismatch"]:
             break
         _start_post_pz_transition_audit(turn_index=turn_index)
+        stage_label = _normal_generation_stage(turn_index)
+        request_stage_start = time.perf_counter()
         request = BackendRequest(
             sample_id=sample["sample_id"],
             seed=seed,
@@ -1946,13 +2446,19 @@ def _tool_loop_sample(
             messages=history,
             stop_sequences=prompt_bundle.stop_sequences,
             tool_mode=definition["mode"],
+            generation_config=_generation_config_for_stage(runtime_config, stage_label),
             metadata={
                 "tool_mode": definition["mode"],
                 "turn_index": turn_index,
+                "generation_stage": stage_label,
                 "sample_kind": sample["metadata"].get("dataset_kind", "unknown"),
             },
         )
+        sample_timing["request_build_or_processor_ms"] += _elapsed_ms(request_stage_start)
+        generate_stage_start = time.perf_counter()
         response = backend.generate(request, sample=sample)
+        sample_timing["generate_ms"] += _elapsed_ms(generate_stage_start)
+        sample_timing["generation_call_count"] += 1
         raw_output_path = _raw_output_path(
             directories["raw_outputs"],
             seed=seed,
@@ -1992,6 +2498,8 @@ def _tool_loop_sample(
                 retry_instruction_text,
                 gate_mode=first_turn_protocol_gate_mode,
             )
+            sample_timing["retry_count"] += 1
+            retry_request_stage_start = time.perf_counter()
             retry_request = BackendRequest(
                 sample_id=sample["sample_id"],
                 seed=seed,
@@ -1999,15 +2507,21 @@ def _tool_loop_sample(
                 messages=history,
                 stop_sequences=prompt_bundle.stop_sequences,
                 tool_mode=definition["mode"],
+                generation_config=_generation_config_for_stage(runtime_config, "turn0_retry"),
                 metadata={
                     "tool_mode": definition["mode"],
                     "turn_index": turn_index,
                     "retry_count": 1,
                     "runtime_intervention": "first_turn_protocol_gate",
+                    "generation_stage": "turn0_retry",
                     "sample_kind": sample["metadata"].get("dataset_kind", "unknown"),
                 },
             )
+            sample_timing["request_build_or_processor_ms"] += _elapsed_ms(retry_request_stage_start)
+            retry_generate_start = time.perf_counter()
             retry_response = backend.generate(retry_request, sample=sample)
+            sample_timing["generate_ms"] += _elapsed_ms(retry_generate_start)
+            sample_timing["generation_call_count"] += 1
             retry_raw_output_path = _retry_raw_output_path(
                 directories["raw_outputs"],
                 seed=seed,
@@ -2058,7 +2572,7 @@ def _tool_loop_sample(
                 first_turn_gate_recovered = True
                 first_turn_gate_outcome = "recovered_to_tool_call"
                 first_turn_gate_sidecar["final_gate_outcome"] = first_turn_gate_outcome
-                write_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
+                _queue_optional_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
                 response = retry_response
                 raw_output_path = retry_raw_output_path
                 decision = retry_decision
@@ -2068,7 +2582,7 @@ def _tool_loop_sample(
                 terminal_answer_present = True
                 terminal_answer_turn_index = turn_index
                 try:
-                    prediction = parse_final_answer(retry_response.raw_output)
+                    prediction = _timed_parse_final_answer(retry_response.raw_output)
                     parser_valid = True
                     schema_valid = True
                     first_turn_gate_outcome = "still_terminal_after_retry"
@@ -2077,7 +2591,7 @@ def _tool_loop_sample(
                     failure_reason = _failure_reason("parser_invalid", str(exc))
                     first_turn_gate_outcome = "retry_parse_failure"
                 first_turn_gate_sidecar["final_gate_outcome"] = first_turn_gate_outcome
-                write_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
+                _queue_optional_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
                 _append_final_answer_message(
                     history,
                     retry_response.raw_output,
@@ -2104,7 +2618,7 @@ def _tool_loop_sample(
                     first_turn_gate_recovered = True
                     first_turn_gate_outcome = "recovered_to_tool_call"
                     first_turn_gate_sidecar["final_gate_outcome"] = first_turn_gate_outcome
-                    write_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
+                    _queue_optional_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
                     _append_tool_request(
                         history,
                         retry_response.raw_output,
@@ -2120,12 +2634,14 @@ def _tool_loop_sample(
                             "retry_repair_original_failure_family": repair_decision.original_failure_family,
                         },
                     )
+                    tool_exec_start = time.perf_counter()
                     tool_result = execute_tool_call(
                         repair_decision.parsed_call,
                         sample=sample,
                         sample_pool=sample_pool,
                         artifact_dir=directories["raw_outputs"] / f"seed_{seed}" / sample_slug / "tool_artifacts",
                     )
+                    sample_timing["tool_exec_ms"] += _elapsed_ms(tool_exec_start)
                     tool_payload = tool_result.to_payload()
                     tool_traces.append(tool_payload)
                     _mark_first_successful_tool(
@@ -2145,7 +2661,7 @@ def _tool_loop_sample(
                 )
                 first_turn_gate_outcome = "retry_parse_failure"
                 first_turn_gate_sidecar["final_gate_outcome"] = first_turn_gate_outcome
-                write_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
+                _queue_optional_json(first_turn_gate_sidecar_path, first_turn_gate_sidecar)
                 _append_final_answer_message(
                     history,
                     retry_response.raw_output,
@@ -2183,10 +2699,7 @@ def _tool_loop_sample(
                 )
                 break
             try:
-                parsed_call = decision.parsed_call or parse_tool_call(
-                    response.raw_output,
-                    tool_path=definition["mode"],
-                )
+                parsed_call = decision.parsed_call or _timed_parse_tool_call(response.raw_output)
             except Exception as exc:  # noqa: BLE001 - explicit gate failure path.
                 error_message = str(exc)
                 failure_reason = _failure_reason("runtime_exception", str(exc))
@@ -2221,12 +2734,14 @@ def _tool_loop_sample(
                 call_id=parsed_call.call_id,
                 extra_metadata=normalization_metadata,
             )
+            tool_exec_start = time.perf_counter()
             tool_result = execute_tool_call(
                 parsed_call,
                 sample=sample,
                 sample_pool=sample_pool,
                 artifact_dir=directories["raw_outputs"] / f"seed_{seed}" / sample_slug / "tool_artifacts",
             )
+            sample_timing["tool_exec_ms"] += _elapsed_ms(tool_exec_start)
             tool_payload = tool_result.to_payload()
             tool_traces.append(tool_payload)
             _mark_first_successful_tool(
@@ -2289,6 +2804,8 @@ def _tool_loop_sample(
                     runtime_intervention="post_pz_second_turn_protocol_gate",
                     gate_mode_metadata_key="post_pz_second_turn_gate_mode",
                 )
+                sample_timing["retry_count"] += 1
+                retry_request_stage_start = time.perf_counter()
                 retry_request = BackendRequest(
                     sample_id=sample["sample_id"],
                     seed=seed,
@@ -2296,15 +2813,24 @@ def _tool_loop_sample(
                     messages=history,
                     stop_sequences=prompt_bundle.stop_sequences,
                     tool_mode=definition["mode"],
+                    generation_config=_generation_config_for_stage(
+                        runtime_config,
+                        "post_pz_second_turn_retry",
+                    ),
                     metadata={
                         "tool_mode": definition["mode"],
                         "turn_index": turn_index,
                         "retry_count": 1,
                         "runtime_intervention": "post_pz_second_turn_protocol_gate",
+                        "generation_stage": "post_pz_second_turn_retry",
                         "sample_kind": sample["metadata"].get("dataset_kind", "unknown"),
                     },
                 )
+                sample_timing["request_build_or_processor_ms"] += _elapsed_ms(retry_request_stage_start)
+                retry_generate_start = time.perf_counter()
                 retry_response = backend.generate(retry_request, sample=sample)
+                sample_timing["generate_ms"] += _elapsed_ms(retry_generate_start)
+                sample_timing["generation_call_count"] += 1
                 retry_raw_output_path = _retry_raw_output_path(
                     directories["raw_outputs"],
                     seed=seed,
@@ -2321,9 +2847,8 @@ def _tool_loop_sample(
 
                 if retry_event == "tool_call":
                     try:
-                        retry_parsed_call = retry_decision.parsed_call or parse_tool_call(
-                            retry_response.raw_output,
-                            tool_path=definition["mode"],
+                        retry_parsed_call = retry_decision.parsed_call or _timed_parse_tool_call(
+                            retry_response.raw_output
                         )
                     except Exception as exc:  # noqa: BLE001 - bounded strict-retry failure path.
                         error_message = str(exc)
@@ -2399,12 +2924,14 @@ def _tool_loop_sample(
                         extra_metadata=retry_normalization_metadata,
                     )
                     try:
+                        tool_exec_start = time.perf_counter()
                         retry_tool_result = execute_tool_call(
                             retry_parsed_call,
                             sample=sample,
                             sample_pool=sample_pool,
                             artifact_dir=directories["raw_outputs"] / f"seed_{seed}" / sample_slug / "tool_artifacts",
                         )
+                        sample_timing["tool_exec_ms"] += _elapsed_ms(tool_exec_start)
                     except Exception as exc:  # noqa: BLE001 - explicit gate-execution failure path.
                         error_message = str(exc)
                         failure_reason = _failure_reason("runtime_exception", str(exc))
@@ -2446,7 +2973,7 @@ def _tool_loop_sample(
                     terminal_answer_present = True
                     terminal_answer_turn_index = turn_index
                     try:
-                        prediction = parse_final_answer(retry_response.raw_output)
+                        prediction = _timed_parse_final_answer(retry_response.raw_output)
                         parser_valid = True
                         schema_valid = True
                         post_pz_second_turn_gate_outcome = "still_terminal_after_retry"
@@ -2508,7 +3035,7 @@ def _tool_loop_sample(
             terminal_answer_present = True
             terminal_answer_turn_index = turn_index
             try:
-                prediction = parse_final_answer(response.raw_output)
+                prediction = _timed_parse_final_answer(response.raw_output)
                 parser_valid = True
                 schema_valid = True
             except Exception as exc:  # noqa: BLE001 - explicit gate failure path.
@@ -2556,6 +3083,8 @@ def _tool_loop_sample(
 
     if last_raw_output_path is None:
         raise InferenceRunError("Tool loop exited without producing any raw output")
+    if last_raw_output_text is None:
+        raise InferenceRunError("Tool loop exited without retaining the last raw output text")
 
     failure_reason = _resolve_failure_reason(
         prediction=prediction,
@@ -2662,11 +3191,12 @@ def _tool_loop_sample(
                 else None
             ),
             "post_pz_transition": post_pz_transition_sidecar,
+            "timing": dict(sample_timing),
         },
     )
     trace_payload = trace.to_audit_payload()
     trace_path = directories["traces"] / f"seed_{seed}" / f"{sample_slug}.json"
-    write_json(trace_path, trace_payload)
+    _write_required_json(trace_path, trace_payload)
 
     tool_usage = _tool_usage_from_traces(tool_traces)
     record = build_prediction_record(
@@ -2684,7 +3214,7 @@ def _tool_loop_sample(
         error_message=error_message,
         failure_reason=failure_reason,
         raw_output_path=str(last_raw_output_path.resolve()),
-        raw_output_sha256=sha256_file(last_raw_output_path),
+        raw_output_sha256=_sha256_text(last_raw_output_text),
         trace_path=str(trace_path.resolve()),
         first_turn_protocol_gate_mode=first_turn_protocol_gate_mode,
         post_pz_second_turn_gate_mode=post_pz_second_turn_gate_mode,
@@ -2842,6 +3372,7 @@ def _tool_loop_sample(
                 else None
             ),
             "post_pz_transition": post_pz_transition_sidecar,
+            "timing": dict(sample_timing),
             "runtime_provenance": _resolved_runtime_provenance(
                 definition,
                 runtime_config,
@@ -2856,8 +3387,22 @@ def _tool_loop_sample(
             prediction=prediction,
         ),
     )
+    _flush_optional_sample_artifacts(
+        _should_write_sample_artifacts(
+            artifact_level=artifact_level,
+            failure_reason=failure_reason,
+            first_turn_gate_triggered=first_turn_gate_triggered,
+            first_turn_gate_outcome=first_turn_gate_outcome,
+            first_turn_gate_repair_attempted=first_turn_gate_repair_attempted,
+            first_turn_gate_repair_succeeded=first_turn_gate_repair_succeeded,
+            post_pz_second_turn_gate_triggered=post_pz_second_turn_gate_triggered,
+            post_pz_second_turn_gate_outcome=post_pz_second_turn_gate_outcome,
+        )
+    )
+    record["metadata"]["timing"] = dict(sample_timing)
     prediction_path = directories["predictions"] / f"seed_{seed}" / f"{sample_slug}.json"
-    write_json(prediction_path, record)
+    _write_required_json(prediction_path, record)
+    record["metadata"]["timing"] = dict(sample_timing)
     return record, trace_payload
 
 
@@ -2884,6 +3429,24 @@ def run_tool_augmented(
     samples = _load_samples(definition, dataset_root=dataset_root, max_samples=max_samples)
     root = _resolve_path(artifact_root or definition["artifacts"]["root"])
     directories = _artifact_dirs(definition, root)
+    progress_snapshot_path = None
+    if runtime_config["progress_mode"] != "off":
+        progress_snapshot_path = Path(
+            runtime_config["progress_snapshot_path"] or _default_progress_snapshot_path(root)
+        ).resolve()
+        runtime_config["progress_snapshot_path"] = str(progress_snapshot_path)
+    progress_reporter = ProgressReporter(
+        run_id=definition["run_id"],
+        total_samples=len(definition["seeds"]) * len(samples),
+        mode=runtime_config["progress_mode"],
+        update_every_n_samples=runtime_config["progress_update_every_n_samples"],
+        snapshot_path=progress_snapshot_path,
+    )
+    processed_samples = 0
+    progress_counts = {
+        "generation_call_count_total": 0,
+        "retry_count_total": 0,
+    }
 
     prediction_records: list[dict[str, Any]] = []
     for seed in definition["seeds"]:
@@ -2900,7 +3463,27 @@ def run_tool_augmented(
             )
             seed_records.append(record)
             prediction_records.append(record)
+            processed_samples += 1
+            record_timing = record["metadata"].get("timing", {})
+            progress_counts["generation_call_count_total"] += int(record_timing.get("generation_call_count", 0))
+            progress_counts["retry_count_total"] += int(record_timing.get("retry_count", 0))
+            progress_reporter.update(
+                processed_samples=processed_samples,
+                current_sample_id=sample["sample_id"],
+                timing_summary=progress_counts,
+            )
+        write_stage_start = time.perf_counter()
         write_jsonl(directories["predictions"] / f"seed_{seed}.jsonl", seed_records)
+        write_elapsed_ms = _elapsed_ms(write_stage_start)
+        for record in seed_records:
+            record["metadata"]["timing"]["file_write_ms"] += write_elapsed_ms / max(len(seed_records), 1)
+
+    progress_reporter.update(
+        processed_samples=processed_samples,
+        current_sample_id=None,
+        timing_summary=progress_counts,
+        force=True,
+    )
 
     runtime_provenance = _resolved_runtime_provenance(definition, runtime_config, backend)
     normalization_summary = _normalization_summary(prediction_records)
@@ -2939,6 +3522,11 @@ def run_tool_augmented(
         first_turn_gate_repair_failure_families_path,
         first_turn_gate_repair_failure_families,
     )
+    timing_summary = (
+        _timing_summary_from_prediction_records(prediction_records)
+        if runtime_config["timing_enabled"]
+        else None
+    )
     metrics_report = build_metrics_report(
         run_id=definition["run_id"],
         tool_mode=definition["mode"],
@@ -2948,9 +3536,14 @@ def run_tool_augmented(
         prediction_records=prediction_records,
         seeds=definition["seeds"],
         runtime_provenance=runtime_provenance,
+        artifact_level=runtime_provenance["artifact_level"],
+        emit_baseline_compare=runtime_provenance["emit_baseline_compare"],
+        emit_delta_report=runtime_provenance["emit_delta_report"],
         tool_first_intervention_strategy=runtime_provenance["tool_first_intervention_strategy"],
         first_turn_protocol_gate_mode=runtime_provenance["first_turn_protocol_gate_mode"],
         post_pz_second_turn_gate_mode=runtime_provenance["post_pz_second_turn_gate_mode"],
+        timing_enabled=runtime_provenance["timing_enabled"],
+        progress_mode=runtime_provenance["progress_mode"],
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
         post_pz_transition_summary=post_pz_transition_summary,
@@ -2958,6 +3551,7 @@ def run_tool_augmented(
         post_pz_second_turn_gate_summary=post_pz_second_turn_gate_summary,
         first_turn_gate_summary=first_turn_gate_summary,
         first_turn_gate_repair_summary=first_turn_gate_repair_summary,
+        timing_summary=timing_summary,
     )
     metrics_report_path = directories["metrics"] / "metrics_report.json"
     per_seed_metrics_path = directories["metrics"] / "per_seed_metrics.json"
@@ -2976,27 +3570,7 @@ def run_tool_augmented(
         metrics_report=metrics_report,
     )
 
-    compare_artifact_root = _comparison_artifact_root(definition, artifact_root)
-    baseline_result = run_baseline(
-        config_path=_resolve_path(definition["compare_to"]["config_path"]),
-        dataset_root=dataset_root,
-        artifact_root=compare_artifact_root,
-        max_samples=max_samples,
-        runtime_overrides=runtime_overrides,
-    )
-    delta_report = build_delta_report(
-        tool_run_id=definition["run_id"],
-        tool_mode=definition["mode"],
-        tool_metrics_report=metrics_report,
-        baseline_run_id=baseline_result["run_definition"]["run_id"],
-        baseline_metrics_report=baseline_result["metrics_report"],
-        notes=[
-            "Local structural comparison against the Prompt 1.3 non-tool baseline.",
-            "This is smoke-validation evidence only and not a paper-quality model comparison.",
-        ],
-    )
     delta_report_path = directories["delta"] / "delta_vs_baseline.json"
-    write_json(delta_report_path, delta_report)
 
     sample_source_path = _resolve_path(dataset_root or definition["sample_source"]["path"])
     run_metadata = _tool_metadata(
@@ -3009,6 +3583,7 @@ def run_tool_augmented(
     run_metadata_path = directories["root"] / "run_metadata.json"
     write_json(run_metadata_path, run_metadata)
 
+    core_artifacts_written_before_optional_tail_work = True
     summary = build_run_summary(
         run_id=definition["run_id"],
         tool_mode=definition["mode"],
@@ -3024,6 +3599,9 @@ def run_tool_augmented(
         seeds=definition["seeds"],
         prediction_records=prediction_records,
         runtime_provenance=runtime_provenance,
+        artifact_level=runtime_provenance["artifact_level"],
+        emit_baseline_compare=runtime_provenance["emit_baseline_compare"],
+        emit_delta_report=runtime_provenance["emit_delta_report"],
         artifact_paths={
             "predictions_dir": str(directories["predictions"].resolve()),
             "traces_dir": str(directories["traces"].resolve()),
@@ -3034,7 +3612,6 @@ def run_tool_augmented(
             "aggregate_metrics": str(aggregate_metrics_path.resolve()),
             "run_metadata": str(run_metadata_path.resolve()),
             "run_manifest": str((directories["root"] / "run_manifest.json").resolve()),
-            "delta_report": str(delta_report_path.resolve()),
             "per_dataset_zero_tool_behavior": zero_tool_sidecars["per_dataset_zero_tool_behavior"],
             "per_category_zero_tool_behavior": zero_tool_sidecars["per_category_zero_tool_behavior"],
             "post_pz_transition_summary": post_pz_transition_sidecars["post_pz_transition_summary"],
@@ -3054,11 +3631,23 @@ def run_tool_augmented(
                 first_turn_gate_repair_failure_families_path.resolve()
             ),
             "tool_first_strategy_summary": strategy_summary_path,
+            **(
+                {"progress_snapshot": str(progress_snapshot_path)}
+                if progress_snapshot_path is not None
+                else {}
+            ),
+            **(
+                {"delta_report": str(delta_report_path.resolve())}
+                if runtime_config["emit_delta_report"]
+                else {}
+            ),
         },
         notes=definition.get("notes", []),
         tool_first_intervention_strategy=runtime_provenance["tool_first_intervention_strategy"],
         first_turn_protocol_gate_mode=runtime_provenance["first_turn_protocol_gate_mode"],
         post_pz_second_turn_gate_mode=runtime_provenance["post_pz_second_turn_gate_mode"],
+        timing_enabled=runtime_provenance["timing_enabled"],
+        progress_mode=runtime_provenance["progress_mode"],
         normalization_summary=normalization_summary,
         prompt_audit_summary=prompt_audit_summary,
         zero_tool_behavior_summary=zero_tool_behavior_summary,
@@ -3067,6 +3656,8 @@ def run_tool_augmented(
         post_pz_second_turn_gate_summary=post_pz_second_turn_gate_summary,
         first_turn_gate_summary=first_turn_gate_summary,
         first_turn_gate_repair_summary=first_turn_gate_repair_summary,
+        timing_summary=timing_summary,
+        core_artifacts_written_before_optional_tail_work=core_artifacts_written_before_optional_tail_work,
     )
     summary_path = directories["root"] / "run_summary.json"
     write_json(summary_path, summary)
@@ -3081,12 +3672,16 @@ def run_tool_augmented(
             "tool_run_definition": sha256_file(config_path),
             "metrics_report": sha256_file(metrics_report_path),
             "run_metadata": sha256_file(run_metadata_path),
-            "delta_report": sha256_file(delta_report_path),
         },
         "execution_boundary": definition["execution_boundary"],
+        "artifact_level": runtime_provenance["artifact_level"],
+        "emit_baseline_compare": runtime_provenance["emit_baseline_compare"],
+        "emit_delta_report": runtime_provenance["emit_delta_report"],
         "tool_first_intervention_strategy": runtime_provenance["tool_first_intervention_strategy"],
         "first_turn_protocol_gate_mode": runtime_provenance["first_turn_protocol_gate_mode"],
         "post_pz_second_turn_gate_mode": runtime_provenance["post_pz_second_turn_gate_mode"],
+        "timing_enabled": runtime_provenance["timing_enabled"],
+        "progress_mode": runtime_provenance["progress_mode"],
         "run_provenance": runtime_provenance,
         "normalization_summary": normalization_summary,
         "prompt_audit_summary": prompt_audit_summary,
@@ -3096,6 +3691,8 @@ def run_tool_augmented(
         "post_pz_second_turn_gate_summary": post_pz_second_turn_gate_summary,
         "first_turn_gate_summary": first_turn_gate_summary,
         "first_turn_gate_repair_summary": first_turn_gate_repair_summary,
+        **({"timing_summary": timing_summary} if timing_summary is not None else {}),
+        "core_artifacts_written_before_optional_tail_work": core_artifacts_written_before_optional_tail_work,
         "notes": [
             "Tool-augmented inference summary manifest.",
             (
@@ -3109,16 +3706,67 @@ def run_tool_augmented(
     run_manifest_path = directories["root"] / "run_manifest.json"
     write_json(run_manifest_path, run_manifest)
 
+    baseline_result: dict[str, Any] | None = None
+    baseline_compare_summary: str | None = None
+    if runtime_config["emit_baseline_compare"] or runtime_config["emit_delta_report"]:
+        tail_stage_start = time.perf_counter()
+        compare_artifact_root = _comparison_artifact_root(definition, artifact_root)
+        baseline_result = run_baseline(
+            config_path=_resolve_path(definition["compare_to"]["config_path"]),
+            dataset_root=dataset_root,
+            artifact_root=compare_artifact_root,
+            max_samples=max_samples,
+            runtime_overrides=runtime_overrides,
+        )
+        if runtime_config["emit_baseline_compare"]:
+            baseline_compare_summary = baseline_result["summary_path"]
+        if runtime_config["emit_delta_report"] and baseline_result is not None:
+            delta_report = build_delta_report(
+                tool_run_id=definition["run_id"],
+                tool_mode=definition["mode"],
+                tool_metrics_report=metrics_report,
+                baseline_run_id=baseline_result["run_definition"]["run_id"],
+                baseline_metrics_report=baseline_result["metrics_report"],
+                notes=[
+                    "Local structural comparison against the Prompt 1.3 non-tool baseline.",
+                    "This is smoke-validation evidence only and not a paper-quality model comparison.",
+                ],
+            )
+            write_json(delta_report_path, delta_report)
+        tail_compare_delta_ms_total = _elapsed_ms(tail_stage_start)
+        if runtime_config["emit_delta_report"]:
+            run_manifest["input_hashes"]["delta_report"] = sha256_file(delta_report_path)
+        if timing_summary is not None:
+            timing_summary = _timing_summary_from_prediction_records(
+                prediction_records,
+                tail_compare_delta_ms_total=tail_compare_delta_ms_total,
+            )
+            metrics_report["timing_summary"] = timing_summary
+            summary["timing_summary"] = timing_summary
+            run_manifest["timing_summary"] = timing_summary
+            write_json(metrics_report_path, metrics_report)
+            write_json(summary_path, summary)
+        run_manifest["content_hash"] = sha256_file(summary_path)
+        write_json(run_manifest_path, run_manifest)
+
     return {
         "run_definition": definition,
         "prediction_records": prediction_records,
         "metrics_report": metrics_report,
-        "delta_report_path": str(delta_report_path.resolve()),
-        "baseline_compare_summary": baseline_result["summary_path"],
         "run_metadata_path": str(run_metadata_path.resolve()),
         "run_manifest_path": str(run_manifest_path.resolve()),
         "summary_path": str(summary_path.resolve()),
         "runtime_provenance": runtime_provenance,
+        **(
+            {"delta_report_path": str(delta_report_path.resolve())}
+            if runtime_config["emit_delta_report"]
+            else {}
+        ),
+        **(
+            {"baseline_compare_summary": baseline_compare_summary}
+            if baseline_compare_summary is not None
+            else {}
+        ),
     }
 
 
@@ -3212,6 +3860,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-do-sample", dest="do_sample", action="store_false")
     parser.set_defaults(do_sample=None)
     parser.add_argument(
+        "--generation-stage-overrides-json",
+        help="Optional JSON object overriding generation config by runtime stage.",
+    )
+    parser.add_argument(
         "--tool-first-intervention-strategy",
         choices=TOOL_FIRST_INTERVENTION_STRATEGIES,
         help="Optional first-turn prompt intervention strategy override for tool-enabled pz_cr eval.",
@@ -3226,6 +3878,40 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=POST_PZ_SECOND_TURN_GATE_MODES,
         help="Optional bounded post-PZ second-turn CR gate override. Defaults to off.",
     )
+    parser.add_argument(
+        "--emit-baseline-compare",
+        type=_parse_bool_flag,
+        help="Optional bool override for baseline-compare tail work.",
+    )
+    parser.add_argument(
+        "--emit-delta-report",
+        type=_parse_bool_flag,
+        help="Optional bool override for delta-report tail work.",
+    )
+    parser.add_argument(
+        "--artifact-level",
+        choices=ARTIFACT_LEVELS,
+        help="Optional artifact retention level override.",
+    )
+    parser.add_argument(
+        "--timing-enabled",
+        type=_parse_bool_flag,
+        help="Optional bool override enabling timing instrumentation.",
+    )
+    parser.add_argument(
+        "--progress-mode",
+        choices=PROGRESS_MODES,
+        help="Optional progress reporting mode override.",
+    )
+    parser.add_argument(
+        "--progress-update-every-n-samples",
+        type=int,
+        help="Optional progress update interval override.",
+    )
+    parser.add_argument(
+        "--progress-snapshot-path",
+        help="Optional explicit machine-readable progress snapshot path override.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate config/runtime surfaces without inference.")
     return parser
 
@@ -3234,6 +3920,9 @@ def main() -> int:
     """Execute the inference CLI and print a compact success summary."""
 
     args = _build_parser().parse_args()
+    generation_stage_overrides = None
+    if args.generation_stage_overrides_json:
+        generation_stage_overrides = json.loads(args.generation_stage_overrides_json)
     runtime_overrides = {
         "base_model_path": args.base_model_path,
         "adapter_checkpoint_path": args.adapter_checkpoint_path,
@@ -3246,6 +3935,14 @@ def main() -> int:
         "tool_first_intervention_strategy": args.tool_first_intervention_strategy,
         "first_turn_protocol_gate_mode": args.first_turn_protocol_gate_mode,
         "post_pz_second_turn_gate_mode": args.post_pz_second_turn_gate_mode,
+        "generation_stage_overrides": generation_stage_overrides,
+        "emit_baseline_compare": args.emit_baseline_compare,
+        "emit_delta_report": args.emit_delta_report,
+        "artifact_level": args.artifact_level,
+        "timing_enabled": args.timing_enabled,
+        "progress_mode": args.progress_mode,
+        "progress_update_every_n_samples": args.progress_update_every_n_samples,
+        "progress_snapshot_path": args.progress_snapshot_path,
         "generation": {
             key: value
             for key, value in {
