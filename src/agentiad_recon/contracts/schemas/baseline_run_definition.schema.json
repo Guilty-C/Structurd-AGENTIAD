@@ -140,6 +140,9 @@
           "type": ["string", "null"],
           "minLength": 1
         },
+        "allow_missing_adapter": {
+          "type": "boolean"
+        },
         "checkpoint_step": {
           "type": ["integer", "null"],
           "minimum": 0

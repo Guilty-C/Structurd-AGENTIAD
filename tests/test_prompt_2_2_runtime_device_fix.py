@@ -96,10 +96,14 @@ class FakePeftWrappedModel:
         self.language_model = base_model.language_model
         self.device = "cpu"
         self.hf_device_map = {"": "cpu"}
+        self.peft_config = {"default": types.SimpleNamespace(target_modules=["q_proj", "v_proj"])}
         self.generate_kwargs: dict[str, object] | None = None
 
     def parameters(self):
         yield FakeParameter("cpu")
+
+    def active_adapters(self) -> list[str]:
+        return ["default"]
 
     def eval(self) -> "FakePeftWrappedModel":
         return self

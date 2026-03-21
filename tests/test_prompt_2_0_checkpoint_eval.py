@@ -116,10 +116,31 @@ class FakePeftModel:
 
     last_call: tuple[object, str, dict[str, object]] | None = None
 
+    def __init__(self, base_model: object) -> None:
+        self.base_model = base_model
+        self.model = base_model
+        self.peft_config = {"default": types.SimpleNamespace(target_modules=["q_proj", "v_proj"])}
+
     @classmethod
     def from_pretrained(cls, model: object, adapter_path: str, **kwargs: object) -> object:
         cls.last_call = (model, adapter_path, kwargs)
-        return model
+        return cls(model)
+
+    def active_adapters(self) -> list[str]:
+        return ["default"]
+
+    def eval(self) -> "FakePeftModel":
+        if hasattr(self.base_model, "eval"):
+            self.base_model.eval()
+        return self
+
+    def to(self, device: str) -> "FakePeftModel":
+        if hasattr(self.base_model, "to"):
+            self.base_model.to(device)
+        return self
+
+    def generate(self, **kwargs: object) -> FakeTensor:
+        return self.base_model.generate(**kwargs)
 
 
 class Prompt20CheckpointEvalTests(unittest.TestCase):
@@ -211,7 +232,11 @@ class Prompt20CheckpointEvalTests(unittest.TestCase):
         self.assertEqual(FakeProcessor.last_from_pretrained[0], "/models/base")
         self.assertEqual(FakeModel.last_from_pretrained[0], "/models/base")
         self.assertEqual(FakePeftModel.last_call[1], "/checkpoints/run_x/checkpoint-553")
-        self.assertTrue(backend.describe_runtime()["adapter_loaded"])
+        runtime = backend.describe_runtime()
+        self.assertTrue(runtime["adapter_load_attempted"])
+        self.assertTrue(runtime["adapter_loaded"])
+        self.assertEqual(runtime["adapter_backend"], "peft.PeftModel.from_pretrained")
+        self.assertEqual(runtime["adapter_target_modules"], ["q_proj", "v_proj"])
 
     def test_fixture_baseline_summary_and_manifest_include_runtime_provenance(self) -> None:
         """Fixture-backed runs should export provenance fields without loading a real model."""

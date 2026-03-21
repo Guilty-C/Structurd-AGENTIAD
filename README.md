@@ -122,6 +122,16 @@ Prompt 2.0 keeps [src/agentiad_recon/baseline.py](/home/zbr/project/lrrelevant/S
 - Prompt 2.12 adds an opt-in bounded post-PZ second-turn CR protocol gate that retries exactly once after a cleaned valid CR contract still gets a direct final answer, while preserving both raw outputs and exporting explicit gate outcomes
 - Prompt 2.13 keeps the same unified evaluator but adds opt-in throughput and observability controls: stage-specific generation budgets via `generation_stage_overrides`, optional `emit_baseline_compare` and `emit_delta_report` tail skips, `artifact_level=throughput` sparse sidecar retention, optional run-level `timing_summary`, and `progress_mode` plus snapshot reporting for long runs; defaults preserve prior forensic behavior and this is a speed/monitoring surface rather than a scientific-target change
 - Prompt 2.14 keeps `baseline.py` as the single inference/evaluation entrypoint and adds deterministic sharded evaluation via `--num-shards` and `--shard-index`, using only stable post-enumeration index partitioning (`i % num_shards == shard_index`) so scientific behavior is unchanged while multi-GPU remote eval becomes safe; each shard records `num_shards`, `shard_index`, `full_sample_count`, `selected_sample_count`, and `sharding_strategy`, and [src/agentiad_recon/merge_shards.py](/home/zbr/project/lrrelevant/Structurd-AGENTIAD/src/agentiad_recon/merge_shards.py) provides a small integrity-first JSONL merge helper that rejects duplicate `sample_id` values instead of recomputing metrics
+- Prompt 2.15 keeps that same unified evaluator and fixes the maintained PEFT adapter path: when `--adapter-checkpoint-path` is provided the transformers runtime now preflights `peft.PeftModel.from_pretrained(...)`, records `adapter_load_attempted`, `adapter_backend`, `adapter_load_error`, `adapter_load_error_type`, `adapter_load_error_repr`, `adapter_target_modules`, and `allow_missing_adapter`, and only sets `adapter_loaded=true` when the returned runtime model exposes concrete PEFT attachment state instead of merely echoing the requested checkpoint path
+
+### Prompt 2.15 Adapter Load Semantics
+
+- `adapter_checkpoint_path` means the user requested an adapter checkpoint. It does not by itself imply that the adapter was attached.
+- `adapter_loaded=true` means the runtime observed a concrete PEFT attachment after `PeftModel.from_pretrained(...)`, such as a `PeftModel` wrapper or non-empty `peft_config`.
+- `adapter_load_attempted=true` means the runtime actually tried to attach the adapter during preflight or generation-path model load.
+- If an adapter load fails and `--adapter-checkpoint-path` was explicitly provided, the run now exits non-zero by default instead of silently degrading to base-only inference.
+- `--allow-missing-adapter` is the explicit opt-out if a user intentionally wants the run to continue with base-only inference while still recording the adapter failure provenance.
+- Recommended remote sequence before any full rerun: run one tiny base-only smoke, run one tiny base+adapter smoke, inspect runtime provenance for `adapter_load_attempted`, `adapter_loaded`, `adapter_load_error`, and `checkpoint_step`, then launch the full 4-GPU sharded rerun only after the tiny adapter smoke reports `adapter_loaded=true`.
 
 ## Trajectory Reconstruction For SFT
 

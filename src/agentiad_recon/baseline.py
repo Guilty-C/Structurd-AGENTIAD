@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from agentiad_recon.backends import (
+    BackendError,
     BackendRequest,
     InferenceBackend,
     MockInferenceBackend,
@@ -141,6 +142,7 @@ def _runtime_defaults() -> dict[str, Any]:
     return {
         "base_model_path": None,
         "adapter_checkpoint_path": None,
+        "allow_missing_adapter": False,
         "checkpoint_step": None,
         "checkpoint_run_dir": None,
         "local_files_only": True,
@@ -436,6 +438,7 @@ def _runtime_config(
     for key in (
         "base_model_path",
         "adapter_checkpoint_path",
+        "allow_missing_adapter",
         "checkpoint_step",
         "checkpoint_run_dir",
         "local_files_only",
@@ -524,7 +527,14 @@ def _resolved_runtime_provenance(
         "policy": definition["backend"]["policy"],
         "base_model_path": runtime_config["base_model_path"],
         "adapter_checkpoint_path": runtime_config["adapter_checkpoint_path"],
+        "adapter_load_attempted": backend_runtime.get("adapter_load_attempted", False),
         "adapter_loaded": backend_runtime.get("adapter_loaded", False),
+        "adapter_backend": backend_runtime.get("adapter_backend"),
+        "adapter_load_error": backend_runtime.get("adapter_load_error"),
+        "adapter_load_error_type": backend_runtime.get("adapter_load_error_type"),
+        "adapter_load_error_repr": backend_runtime.get("adapter_load_error_repr"),
+        "adapter_target_modules": backend_runtime.get("adapter_target_modules"),
+        "allow_missing_adapter": runtime_config["allow_missing_adapter"],
         "checkpoint_step": runtime_config["checkpoint_step"],
         "checkpoint_run_dir": runtime_config["checkpoint_run_dir"],
         "dataset_root": runtime_config["dataset_root"],
@@ -552,6 +562,21 @@ def _resolved_runtime_provenance(
         "selected_sample_count": shard_summary["selected_sample_count"],
         "sharding_strategy": shard_summary["sharding_strategy"],
     }
+
+
+def _prepare_backend_runtime_for_eval(
+    backend: InferenceBackend,
+    *,
+    runtime_config: dict[str, Any],
+) -> None:
+    """Eagerly prepare adapter-backed runtimes so explicit adapter requests fail fast."""
+
+    if not runtime_config["adapter_checkpoint_path"]:
+        return
+    try:
+        backend.prepare_runtime()
+    except BackendError as exc:
+        raise InferenceRunError(str(exc)) from exc
 
 
 def _select_backend(config: dict[str, Any], *, runtime_config: dict[str, Any] | None = None) -> InferenceBackend:
@@ -1693,6 +1718,7 @@ def run_baseline(
         num_shards=int(runtime_config["num_shards"]),
         shard_index=int(runtime_config["shard_index"]),
     )
+    _prepare_backend_runtime_for_eval(backend, runtime_config=runtime_config)
     root = _resolve_path(artifact_root or definition["artifacts"]["root"])
     directories = _artifact_dirs(definition, root)
     runtime_provenance = _resolved_runtime_provenance(
@@ -3497,6 +3523,7 @@ def run_tool_augmented(
         num_shards=int(runtime_config["num_shards"]),
         shard_index=int(runtime_config["shard_index"]),
     )
+    _prepare_backend_runtime_for_eval(backend, runtime_config=runtime_config)
     root = _resolve_path(artifact_root or definition["artifacts"]["root"])
     directories = _artifact_dirs(definition, root)
     runtime_provenance = _resolved_runtime_provenance(
@@ -3944,6 +3971,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shard-index", type=int, default=0, help="Deterministic shard index in [0, num_shards). Default: 0.")
     parser.add_argument("--base-model-path", help="Optional base model path override.")
     parser.add_argument("--adapter-checkpoint-path", help="Optional LoRA adapter checkpoint override.")
+    parser.add_argument(
+        "--allow-missing-adapter",
+        dest="allow_missing_adapter",
+        action="store_true",
+        help="Continue with base-only inference if an explicit adapter load fails.",
+    )
+    parser.add_argument("--no-allow-missing-adapter", dest="allow_missing_adapter", action="store_false")
+    parser.set_defaults(allow_missing_adapter=None)
     parser.add_argument("--checkpoint-step", type=int, help="Optional checkpoint step override.")
     parser.add_argument("--checkpoint-run-dir", help="Optional checkpoint run directory override.")
     parser.add_argument("--device", help="Optional device override, for example `auto`, `cuda`, or `cpu`.")
@@ -4027,6 +4062,7 @@ def main() -> int:
     runtime_overrides = {
         "base_model_path": args.base_model_path,
         "adapter_checkpoint_path": args.adapter_checkpoint_path,
+        "allow_missing_adapter": args.allow_missing_adapter,
         "checkpoint_step": args.checkpoint_step,
         "checkpoint_run_dir": args.checkpoint_run_dir,
         "device": args.device,

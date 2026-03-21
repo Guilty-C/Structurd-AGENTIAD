@@ -54,6 +54,11 @@ class InferenceBackend(ABC):
 
     backend_name: str
 
+    def prepare_runtime(self) -> None:
+        """Eagerly prepare one backend runtime when the runner wants fail-fast checks."""
+
+        return None
+
     def describe_runtime(self) -> dict[str, Any]:
         """Return audit metadata about the backend runtime configuration."""
 
@@ -88,6 +93,7 @@ def _normalize_runtime_config(runtime_config: dict[str, Any] | None) -> dict[str
     config.setdefault("checkpoint_run_dir", None)
     config.setdefault("local_files_only", True)
     config.setdefault("trust_remote_code", True)
+    config.setdefault("allow_missing_adapter", False)
     config.setdefault("dtype", "auto")
     config.setdefault("device", "auto")
     return config
@@ -128,7 +134,14 @@ class MockInferenceBackend(InferenceBackend):
             "policy": self.policy,
             "base_model_path": self.runtime_config["base_model_path"],
             "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
+            "adapter_load_attempted": False,
             "adapter_loaded": False,
+            "adapter_backend": None,
+            "adapter_load_error": None,
+            "adapter_load_error_type": None,
+            "adapter_load_error_repr": None,
+            "adapter_target_modules": None,
+            "allow_missing_adapter": self.runtime_config["allow_missing_adapter"],
             "checkpoint_step": self.runtime_config["checkpoint_step"],
             "checkpoint_run_dir": self.runtime_config["checkpoint_run_dir"],
             "generation_config": dict(self.runtime_config["generation"]),
@@ -217,7 +230,14 @@ class MockToolAwareBackend(InferenceBackend):
             "policy": self.policy,
             "base_model_path": self.runtime_config["base_model_path"],
             "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
+            "adapter_load_attempted": False,
             "adapter_loaded": False,
+            "adapter_backend": None,
+            "adapter_load_error": None,
+            "adapter_load_error_type": None,
+            "adapter_load_error_repr": None,
+            "adapter_target_modules": None,
+            "allow_missing_adapter": self.runtime_config["allow_missing_adapter"],
             "checkpoint_step": self.runtime_config["checkpoint_step"],
             "checkpoint_run_dir": self.runtime_config["checkpoint_run_dir"],
             "generation_config": dict(self.runtime_config["generation"]),
@@ -361,7 +381,14 @@ class VLLMBackendAdapter(InferenceBackend):
             "policy": "skeleton",
             "base_model_path": self.runtime_config["base_model_path"],
             "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
+            "adapter_load_attempted": False,
             "adapter_loaded": False,
+            "adapter_backend": None,
+            "adapter_load_error": None,
+            "adapter_load_error_type": None,
+            "adapter_load_error_repr": None,
+            "adapter_target_modules": None,
+            "allow_missing_adapter": self.runtime_config["allow_missing_adapter"],
             "checkpoint_step": self.runtime_config["checkpoint_step"],
             "checkpoint_run_dir": self.runtime_config["checkpoint_run_dir"],
             "generation_config": dict(self.runtime_config["generation"]),
@@ -408,8 +435,19 @@ class TransformersVisionLanguageBackend(InferenceBackend):
         self._processor: Any | None = None
         self._model: Any | None = None
         self._torch: Any | None = None
+        self._adapter_load_attempted = False
         self._adapter_loaded = False
+        self._adapter_backend: str | None = None
+        self._adapter_load_error: str | None = None
+        self._adapter_load_error_type: str | None = None
+        self._adapter_load_error_repr: str | None = None
+        self._adapter_target_modules: list[str] | None = None
         self._model_class_name: str | None = None
+
+    def prepare_runtime(self) -> None:
+        """Eagerly load the maintained transformers runtime when requested."""
+
+        self._load_model()
 
     def describe_runtime(self) -> dict[str, Any]:
         """Return the effective runtime state for audit artifacts."""
@@ -420,7 +458,14 @@ class TransformersVisionLanguageBackend(InferenceBackend):
             "policy": self.policy,
             "base_model_path": self.runtime_config["base_model_path"],
             "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
+            "adapter_load_attempted": self._adapter_load_attempted,
             "adapter_loaded": self._adapter_loaded,
+            "adapter_backend": self._adapter_backend,
+            "adapter_load_error": self._adapter_load_error,
+            "adapter_load_error_type": self._adapter_load_error_type,
+            "adapter_load_error_repr": self._adapter_load_error_repr,
+            "adapter_target_modules": self._adapter_target_modules,
+            "allow_missing_adapter": self.runtime_config["allow_missing_adapter"],
             "checkpoint_step": self.runtime_config["checkpoint_step"],
             "checkpoint_run_dir": self.runtime_config["checkpoint_run_dir"],
             "generation_config": dict(self.runtime_config["generation"]),
@@ -453,6 +498,66 @@ class TransformersVisionLanguageBackend(InferenceBackend):
             if model_class is not None:
                 candidates.append(model_class)
         return candidates
+
+    def _record_adapter_load_error(self, exc: BaseException) -> None:
+        """Persist one adapter-load failure so summary provenance stays explicit."""
+
+        self._adapter_load_error = str(exc)
+        self._adapter_load_error_type = type(exc).__name__
+        self._adapter_load_error_repr = repr(exc)
+
+    def _adapter_active_names(self, model: Any) -> list[str]:
+        """Recover the active adapter names when the runtime exposes them."""
+
+        active_adapters = getattr(model, "active_adapters", None)
+        if callable(active_adapters):
+            try:
+                resolved = active_adapters()
+            except TypeError:
+                resolved = active_adapters
+        else:
+            resolved = active_adapters
+        if isinstance(resolved, str):
+            return [resolved]
+        if isinstance(resolved, (list, tuple, set)):
+            return [str(item) for item in resolved if item]
+
+        active_adapter = getattr(model, "active_adapter", None)
+        if callable(active_adapter):
+            try:
+                active_adapter = active_adapter()
+            except TypeError:
+                pass
+        if isinstance(active_adapter, str) and active_adapter:
+            return [active_adapter]
+        return []
+
+    def _adapter_target_modules_from_model(self, model: Any) -> list[str] | None:
+        """Extract target-module hints from PEFT config when available."""
+
+        peft_config = getattr(model, "peft_config", None)
+        if not isinstance(peft_config, Mapping) or not peft_config:
+            return None
+
+        modules: list[str] = []
+        for config in peft_config.values():
+            target_modules = getattr(config, "target_modules", None)
+            if isinstance(target_modules, str) and target_modules:
+                modules.append(target_modules)
+            elif isinstance(target_modules, (list, tuple, set)):
+                modules.extend(str(item) for item in target_modules if item)
+        unique_modules = sorted(set(modules))
+        return unique_modules or None
+
+    def _adapter_is_attached(self, model: Any, peft_model_class: Any) -> bool:
+        """Verify that the runtime model exposes concrete PEFT attachment state."""
+
+        if peft_model_class is not None and isinstance(model, peft_model_class):
+            return True
+        peft_config = getattr(model, "peft_config", None)
+        if isinstance(peft_config, Mapping) and peft_config:
+            return True
+        return bool(self._adapter_active_names(model))
 
     def _load_model(self) -> None:
         """Load the processor and model, then optionally attach a PEFT adapter."""
@@ -502,18 +607,39 @@ class TransformersVisionLanguageBackend(InferenceBackend):
 
         adapter_path = self.runtime_config["adapter_checkpoint_path"]
         if adapter_path:
+            self._adapter_load_attempted = True
+            self._adapter_backend = "peft.PeftModel.from_pretrained"
+            self._adapter_load_error = None
+            self._adapter_load_error_type = None
+            self._adapter_load_error_repr = None
             try:
                 peft_module = importlib.import_module("peft")
-                peft_model_class = getattr(peft_module, "PeftModel")
-                self._model = peft_model_class.from_pretrained(
+                peft_model_class = getattr(peft_module, "PeftModel", None)
+                if peft_model_class is None:
+                    raise BackendError("peft.PeftModel is unavailable in the local runtime")
+                loaded_model = peft_model_class.from_pretrained(
                     self._model,
                     adapter_path,
                     local_files_only=self.runtime_config["local_files_only"],
                     is_trainable=False,
                 )
+                if not self._adapter_is_attached(loaded_model, peft_model_class):
+                    raise BackendError(
+                        "PEFT adapter load did not return an attached adapter-bearing model"
+                    )
+                self._model = loaded_model
                 self._adapter_loaded = True
+                self._adapter_target_modules = self._adapter_target_modules_from_model(self._model)
             except Exception as exc:  # noqa: BLE001
-                raise BackendError(f"Failed to load PEFT adapter from {adapter_path}: {exc}") from exc
+                self._adapter_loaded = False
+                self._adapter_target_modules = None
+                self._record_adapter_load_error(exc)
+                if not self.runtime_config["allow_missing_adapter"]:
+                    raise BackendError(
+                        f"Failed to load PEFT adapter from {adapter_path}: "
+                        f"{type(exc).__name__}: {exc}. Pass --allow-missing-adapter to continue "
+                        "with base-only inference."
+                    ) from exc
 
         if device != "auto" and hasattr(self._model, "to"):
             self._model = self._model.to(device)
@@ -793,7 +919,12 @@ class TransformersVisionLanguageBackend(InferenceBackend):
                 "tool_mode": request.tool_mode,
                 "base_model_path": self.runtime_config["base_model_path"],
                 "adapter_checkpoint_path": self.runtime_config["adapter_checkpoint_path"],
+                "adapter_load_attempted": self._adapter_load_attempted,
                 "adapter_loaded": self._adapter_loaded,
+                "adapter_backend": self._adapter_backend,
+                "adapter_load_error": self._adapter_load_error,
+                "adapter_load_error_type": self._adapter_load_error_type,
+                "adapter_target_modules": self._adapter_target_modules,
                 "generation_config": dict(generation_config),
             },
         )
